@@ -1,0 +1,37 @@
+{
+  "SAL Context Skeleton": {
+    "prefix": "context",
+    "body": [
+      "${1:my_context}: CONTEXT =",
+      "BEGIN",
+      "  ${2:-- declarations}",
+      "END"
+    ],
+    "description": "Create a SAL context"
+  },
+  "SAL Module Skeleton": {
+    "prefix": "module",
+    "body": [
+      "${1:my_module}: MODULE =",
+      "BEGIN",
+      "  INPUT ${2:in_var} : ${3:BOOLEAN}",
+      "  OUTPUT ${4:out_var} : ${3:BOOLEAN}",
+      "  INITIALIZATION",
+      "    ${4:out_var} = ${5:FALSE}",
+      "  TRANSITION",
+      "    [",
+      "      ${6:step}:",
+      "        ${7:TRUE} --> ${4:out_var}' = ${8:NOT(${4:out_var})};",
+      "    ]",
+      "END"
+    ],
+    "description": "Create a SAL module"
+  },
+  "SAL Theorem Skeleton": {
+    "prefix": "theorem",
+    "body": [
+      "${1:prop}: THEOREM ${2:system} |- ${3:G(${4:TRUE})};"
+    ],
+    "description": "Create a SAL theorem/assertion"
+  }
+}
