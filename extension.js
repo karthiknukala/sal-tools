@@ -132,11 +132,14 @@ const INTERACTIVE_TOOLS = {
 const DEFAULT_NIGHTLY_REPOSITORY = 'karthiknukala/sal';
 const DEFAULT_STARTUP_REPOSITORIES = [DEFAULT_NIGHTLY_REPOSITORY];
 const NIGHTLY_RELEASE_WEB_URL = 'https://github.com/karthiknukala/sal/releases/tag/nightly';
-const STARTUP_REMOTE_CACHE_TTL_MS = 5 * 60 * 1000;
-const STARTUP_REMOTE_CACHE_KEY = 'sal.startup.remoteCache';
+const STARTUP_COMMITS_CACHE_KEY = 'sal.startup.remote.commits';
+const STARTUP_NIGHTLY_CACHE_KEY = 'sal.startup.remote.nightly';
+const STARTUP_COMMITS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const STARTUP_NIGHTLY_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const STARTUP_NIGHTLY_INSTALLED_CHECK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const NIGHTLY_INSTALLATION_STATE_KEY = 'sal.nightly.installation';
-const RECENT_PROJECTS_KEY = 'sal.startup.recentProjects';
-const MAX_RECENT_PROJECTS = 10;
+const RECENT_SAL_FILES_KEY = 'sal.startup.recentSalFiles';
+const MAX_RECENT_SAL_FILES = 6;
 
 /**
  * Curated flag menu (used by "SAL: Configure Tool Flags…").
@@ -326,25 +329,26 @@ class SalCodeLensProvider {
   provideCodeLenses(document, token) {
     const idx = indexSalDocument(document);
     const lenses = [];
+    const codeLensArg = (payload) => Object.assign({ source: 'codelens' }, payload || {});
 
     // Top-level lens: run checker on this file
     const topRange = new vscode.Range(0, 0, 0, 0);
     lenses.push(new vscode.CodeLens(topRange, {
       title: 'SAL: Run Checker…',
       command: 'sal.runChecker',
-      arguments: [{ uri: document.uri }]
+      arguments: [codeLensArg({ uri: document.uri })]
     }));
 
     lenses.push(new vscode.CodeLens(topRange, {
       title: 'SAL: Configuration Manager…',
       command: 'sal.openRunConfig',
-      arguments: [{ uri: document.uri }]
+      arguments: [codeLensArg({ uri: document.uri })]
     }));
 
     lenses.push(new vscode.CodeLens(topRange, {
       title: 'SAL: Runtime Dashboard…',
       command: 'sal.openRuntimeDashboard',
-      arguments: [{ uri: document.uri }]
+      arguments: [codeLensArg({ uri: document.uri })]
     }));
 
     // Context lenses
@@ -353,12 +357,12 @@ class SalCodeLensProvider {
       lenses.push(new vscode.CodeLens(range, {
         title: 'SAL: WFC',
         command: 'sal.runWfc',
-        arguments: [{ uri: document.uri, contextName: ctx.name }]
+        arguments: [codeLensArg({ uri: document.uri, contextName: ctx.name, declarationLine: ctx.line, declarationKind: 'context' })]
       }));
       lenses.push(new vscode.CodeLens(range, {
         title: 'SAL: SMC (all assertions)',
         command: 'sal.runSmc',
-        arguments: [{ uri: document.uri, contextName: ctx.name, runWholeContext: true }]
+        arguments: [codeLensArg({ uri: document.uri, contextName: ctx.name, runWholeContext: true, declarationLine: ctx.line, declarationKind: 'context' })]
       }));
     }
 
@@ -366,8 +370,8 @@ class SalCodeLensProvider {
     for (const mod of idx.modules) {
       const contextName = findEnclosingContextName(idx.contexts, mod.line);
       const runArgs = contextName
-        ? { uri: document.uri, contextName, moduleName: mod.name }
-        : { uri: document.uri, moduleName: mod.name };
+        ? codeLensArg({ uri: document.uri, contextName, moduleName: mod.name, declarationLine: mod.line, declarationKind: 'module' })
+        : codeLensArg({ uri: document.uri, moduleName: mod.name, declarationLine: mod.line, declarationKind: 'module' });
       const range = new vscode.Range(mod.line, 0, mod.line, 0);
       lenses.push(new vscode.CodeLens(range, {
         title: 'SAL: Deadlock',
@@ -390,8 +394,8 @@ class SalCodeLensProvider {
     for (const asrt of idx.assertions) {
       const contextName = findEnclosingContextName(idx.contexts, asrt.line);
       const runArgs = contextName
-        ? { uri: document.uri, contextName, assertionName: asrt.name }
-        : { uri: document.uri, assertionName: asrt.name };
+        ? codeLensArg({ uri: document.uri, contextName, assertionName: asrt.name, declarationLine: asrt.line, declarationKind: 'assertion' })
+        : codeLensArg({ uri: document.uri, assertionName: asrt.name, declarationLine: asrt.line, declarationKind: 'assertion' });
       const range = new vscode.Range(asrt.line, 0, asrt.line, 0);
       lenses.push(new vscode.CodeLens(range, {
         title: 'SAL: SMC',
@@ -973,7 +977,15 @@ async function prepareCliInvocation(extCtx, toolSpec, arg, runOverrides, options
     env,
     cmd,
     args,
-    cmdLineForDisplay
+    cmdLineForDisplay,
+    target: {
+      contextName: contextName || '',
+      moduleName: moduleName || '',
+      assertionName: assertionName || '',
+      runWholeContext: !!runWholeContext,
+      useContext,
+      contextExpression: contextExpr || ''
+    }
   };
 }
 
@@ -997,10 +1009,28 @@ async function runCliTool(extCtx, outputChannel, diagnostics, toolSpec, arg, run
   const cmd = prepared.cmd;
   const args = prepared.args;
   const cmdLineForDisplay = prepared.cmdLineForDisplay;
+  const targetSummary = summarizeInvocationTarget(prepared.target);
+  const isCodeLensRun = !!(arg && arg.source === 'codelens');
+  const declarationText = isCodeLensRun
+    ? extractDeclarationForCodeLens(document, arg, prepared.target)
+    : '';
+  const resultPanel = isCodeLensRun ? SalCodeLensResultPanel.createOrShow() : null;
 
   outputChannel.clear();
   outputChannel.appendLine(cmdLineForDisplay);
   outputChannel.appendLine('');
+
+  if (resultPanel) {
+    resultPanel.postRunState({
+      title: `SAL: ${toolSpec.title}`,
+      targetSummary,
+      theorem: declarationText || 'No declaration metadata found for this CodeLens action.',
+      commandLine: cmdLineForDisplay,
+      resultText: '',
+      statusText: 'Running…',
+      timestamp: new Date().toISOString()
+    }).catch(() => {});
+  }
 
   // Clear previous diagnostics for this file
   if (diagnosticsEnable) {
@@ -1008,6 +1038,7 @@ async function runCliTool(extCtx, outputChannel, diagnostics, toolSpec, arg, run
   }
 
   const collectedLines = [];
+  let collectedText = '';
 
   await vscode.window.withProgress(
     {
@@ -1028,6 +1059,18 @@ async function runCliTool(extCtx, outputChannel, diagnostics, toolSpec, arg, run
           });
         } catch (e) {
           vscode.window.showErrorMessage(`SAL: Failed to start ${toolSpec.exe}: ${e.message || e}`);
+          if (resultPanel) {
+            const msg = String(e && e.message ? e.message : e);
+            resultPanel.postRunState({
+              title: `SAL: ${toolSpec.title}`,
+              targetSummary,
+              theorem: declarationText || 'No declaration metadata found for this CodeLens action.',
+              commandLine: cmdLineForDisplay,
+              resultText: `[process error] ${msg}`,
+              statusText: 'Failed to start.',
+              timestamp: new Date().toISOString()
+            }).catch(() => {});
+          }
           resolve();
           return;
         }
@@ -1041,12 +1084,14 @@ async function runCliTool(extCtx, outputChannel, diagnostics, toolSpec, arg, run
           const text = buf.toString('utf8');
           outputChannel.append(text);
           collectedLines.push(...text.split(/\r?\n/));
+          collectedText = appendBoundedText(collectedText, text, 350000);
         });
 
         proc.stderr.on('data', (buf) => {
           const text = buf.toString('utf8');
           outputChannel.append(text);
           collectedLines.push(...text.split(/\r?\n/));
+          collectedText = appendBoundedText(collectedText, text, 350000);
         });
 
         proc.on('error', (err) => {
@@ -1055,6 +1100,18 @@ async function runCliTool(extCtx, outputChannel, diagnostics, toolSpec, arg, run
           outputChannel.appendLine(`\n[process error] ${msg}`);
           outputChannel.show(true);
           vscode.window.showErrorMessage(`SAL: Failed to start ${toolSpec.exe}: ${msg}`);
+          if (resultPanel) {
+            const fullResult = appendBoundedText(collectedText, `\n[process error] ${msg}\n`, 350000);
+            resultPanel.postRunState({
+              title: `SAL: ${toolSpec.title}`,
+              targetSummary,
+              theorem: declarationText || 'No declaration metadata found for this CodeLens action.',
+              commandLine: cmdLineForDisplay,
+              resultText: fullResult,
+              statusText: 'Process error.',
+              timestamp: new Date().toISOString()
+            }).catch(() => {});
+          }
           resolve();
         });
 
@@ -1062,10 +1119,26 @@ async function runCliTool(extCtx, outputChannel, diagnostics, toolSpec, arg, run
           if (hadProcessError) return;
           outputChannel.appendLine(`\n[exit code] ${code}`);
           outputChannel.show(true);
+          const fullResult = appendBoundedText(collectedText, `\n[exit code] ${code}\n`, 350000);
 
           if (diagnosticsEnable) {
             const diags = parseDiagnosticsFromOutput(collectedLines, document.uri);
             diagnostics.set(document.uri, diags);
+          }
+
+          if (resultPanel) {
+            let statusText = `Completed (exit code ${code}).`;
+            if (wasCancelled) statusText = 'Cancelled.';
+            else if (code !== 0) statusText = `Failed (exit code ${code}).`;
+            resultPanel.postRunState({
+              title: `SAL: ${toolSpec.title}`,
+              targetSummary,
+              theorem: declarationText || 'No declaration metadata found for this CodeLens action.',
+              commandLine: cmdLineForDisplay,
+              resultText: fullResult,
+              statusText,
+              timestamp: new Date().toISOString()
+            }).catch(() => {});
           }
 
           if (wasCancelled) {
@@ -1140,6 +1213,80 @@ function parseDiagnosticsFromOutput(lines, defaultUri) {
   }
 
   return diags;
+}
+
+function extractDeclarationFromLine(document, startLine, declarationKind) {
+  if (!document || !Number.isInteger(startLine) || startLine < 0 || startLine >= document.lineCount) return '';
+  const lines = [];
+  const kind = String(declarationKind || '').toLowerCase();
+  const maxLines = Math.min(document.lineCount, startLine + (kind === 'context' || kind === 'module' ? 80 : 40));
+  const nextDeclRe = /^\s*[A-Za-z][\w?_]*\s*:\s*(THEOREM|LEMMA|CLAIM|OBLIGATION|MODULE|CONTEXT|TYPE)\b/i;
+  for (let i = startLine; i < maxLines; i++) {
+    const text = document.lineAt(i).text;
+    if (i > startLine && nextDeclRe.test(text)) {
+      break;
+    }
+    lines.push(text);
+    if (kind === 'assertion') {
+      if (/;\s*(--.*)?$/.test(text) && i >= startLine) break;
+      if (i > startLine && /^\s*$/.test(text)) break;
+    } else if (kind === 'context' || kind === 'module') {
+      if (/\bBEGIN\b/i.test(text) && i > startLine) break;
+      if (i > startLine + 8 && /^\s*$/.test(text)) break;
+    } else if (i > startLine && /^\s*$/.test(text)) {
+      break;
+    }
+  }
+  return lines.join('\n').trim();
+}
+
+function extractDeclarationForCodeLens(document, arg, target) {
+  if (!document) return '';
+  const line = arg && Number.isInteger(arg.declarationLine) ? arg.declarationLine : null;
+  const kind = arg && arg.declarationKind ? String(arg.declarationKind) : '';
+  if (line !== null) {
+    return extractDeclarationFromLine(document, line, kind);
+  }
+
+  if (target && target.assertionName) {
+    const idx = indexSalDocument(document);
+    const assertion = (idx.assertions || []).find((a) => a.name === target.assertionName);
+    if (assertion) {
+      return extractDeclarationFromLine(document, assertion.line, 'assertion');
+    }
+  }
+  if (target && target.moduleName) {
+    const idx = indexSalDocument(document);
+    const mod = (idx.modules || []).find((m) => m.name === target.moduleName);
+    if (mod) {
+      return extractDeclarationFromLine(document, mod.line, 'module');
+    }
+  }
+  if (target && target.contextName) {
+    const idx = indexSalDocument(document);
+    const ctx = (idx.contexts || []).find((c) => c.name === target.contextName);
+    if (ctx) {
+      return extractDeclarationFromLine(document, ctx.line, 'context');
+    }
+  }
+  return '';
+}
+
+function summarizeInvocationTarget(target) {
+  if (!target || typeof target !== 'object') return '';
+  const pieces = [];
+  if (target.contextName) pieces.push(`context=${target.contextName}`);
+  if (target.moduleName) pieces.push(`module=${target.moduleName}`);
+  if (target.assertionName) pieces.push(`assertion=${target.assertionName}`);
+  if (target.runWholeContext) pieces.push('whole-context');
+  return pieces.join(' | ');
+}
+
+function appendBoundedText(current, chunk, maxChars) {
+  const max = Number(maxChars || 300000);
+  const next = `${String(current || '')}${String(chunk || '')}`;
+  if (next.length <= max) return next;
+  return next.slice(next.length - max);
 }
 
 class SalRuntimeManager {
@@ -1352,6 +1499,185 @@ class SalRuntimeManager {
       }
     }
     this._emit();
+  }
+}
+
+class SalCodeLensResultPanel {
+  static currentPanel = undefined;
+
+  static createOrShow() {
+    const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
+    if (SalCodeLensResultPanel.currentPanel) {
+      const existing = SalCodeLensResultPanel.currentPanel;
+      // Keep the panel in its current editor group and preserve focus on the SAL editor.
+      existing.panel.reveal(existing.panel.viewColumn || vscode.ViewColumn.Beside, true);
+      return SalCodeLensResultPanel.currentPanel;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      'salCodeLensResult',
+      'SAL Proof Result',
+      { viewColumn: (column ? vscode.ViewColumn.Beside : vscode.ViewColumn.One), preserveFocus: true },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+
+    const created = new SalCodeLensResultPanel(panel);
+    SalCodeLensResultPanel.currentPanel = created;
+    return created;
+  }
+
+  constructor(panel) {
+    this.panel = panel;
+    this.panel.onDidDispose(() => {
+      if (SalCodeLensResultPanel.currentPanel === this) {
+        SalCodeLensResultPanel.currentPanel = undefined;
+      }
+    });
+    this.panel.webview.html = this._getHtmlForWebview(this.panel.webview);
+  }
+
+  async postRunState(state) {
+    await this.panel.webview.postMessage({ type: 'runState', state: state || {} });
+  }
+
+  _getHtmlForWebview(webview) {
+    const nonce = getNonce();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <title>SAL Proof Result</title>
+  <style>
+    :root {
+      --sal-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+      --sal-bg: var(--vscode-editor-background);
+      --sal-card-bg: var(--vscode-editorWidget-background);
+      --sal-radius: 10px;
+    }
+    body {
+      margin: 0;
+      padding: 14px;
+      background: var(--sal-bg);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+    }
+    .shell {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .hero {
+      border: 1px solid var(--sal-border);
+      border-radius: var(--sal-radius);
+      background: linear-gradient(135deg, rgba(127,127,127,0.14), rgba(127,127,127,0.05));
+      padding: 10px 12px;
+    }
+    .title {
+      margin: 0;
+      font-size: 1.1em;
+    }
+    .muted { opacity: 0.82; }
+    .small { font-size: 0.9em; }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1.5fr;
+      gap: 10px;
+    }
+    .pane {
+      border: 1px solid var(--sal-border);
+      border-radius: var(--sal-radius);
+      background: var(--sal-card-bg);
+      min-height: 260px;
+      display: flex;
+      flex-direction: column;
+    }
+    .pane-head {
+      font-weight: 650;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--sal-border);
+      background: rgba(127,127,127,0.08);
+    }
+    .pane-body {
+      margin: 0;
+      padding: 10px;
+      white-space: pre-wrap;
+      overflow: auto;
+      flex: 1;
+      font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+      font-size: 0.9em;
+      line-height: 1.35;
+    }
+    @media (max-width: 1000px) {
+      .split {
+        grid-template-columns: 1fr;
+      }
+      .pane {
+        min-height: 180px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h2 id="runTitle" class="title">SAL Proof Result</h2>
+      <div id="runMeta" class="small muted"></div>
+      <div id="runStatus" class="small"></div>
+    </section>
+
+    <section class="split">
+      <article class="pane">
+        <div class="pane-head">Theorem Statement</div>
+        <pre id="theoremPane" class="pane-body"></pre>
+      </article>
+      <article class="pane">
+        <div class="pane-head">Tool Command Invocation</div>
+        <pre id="commandPane" class="pane-body"></pre>
+      </article>
+      <article class="pane">
+        <div class="pane-head">Tool Result</div>
+        <pre id="resultPane" class="pane-body"></pre>
+      </article>
+    </section>
+  </div>
+
+  <script nonce="${nonce}">
+    const byId = (id) => document.getElementById(id);
+    const runTitle = byId('runTitle');
+    const runMeta = byId('runMeta');
+    const runStatus = byId('runStatus');
+    const theoremPane = byId('theoremPane');
+    const commandPane = byId('commandPane');
+    const resultPane = byId('resultPane');
+
+    function renderState(state) {
+      const s = state || {};
+      runTitle.textContent = s.title || 'SAL Proof Result';
+      const metaParts = [];
+      if (s.targetSummary) metaParts.push(s.targetSummary);
+      if (s.timestamp) metaParts.push(new Date(s.timestamp).toLocaleString());
+      runMeta.textContent = metaParts.join(' | ');
+      runStatus.textContent = s.statusText || '';
+      theoremPane.textContent = s.theorem || 'No theorem target selected.';
+      commandPane.textContent = s.commandLine || '';
+      resultPane.textContent = s.resultText || '';
+      resultPane.scrollTop = resultPane.scrollHeight;
+    }
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (!msg || msg.type !== 'runState') return;
+      renderState(msg.state || {});
+    });
+  </script>
+</body>
+</html>`;
   }
 }
 
@@ -3645,6 +3971,9 @@ async function githubGetJson(url) {
   const res = await requestBuffer(url, githubHeaders(), 5);
   if (res.statusCode < 200 || res.statusCode >= 300) {
     const raw = res.body ? res.body.toString('utf8').trim() : '';
+    if (res.statusCode === 403 && /rate limit/i.test(raw)) {
+      throw new Error('GitHub API rate limit exceeded. Try again later.');
+    }
     throw new Error(`GitHub API request failed (${res.statusCode}): ${raw || 'No response body.'}`);
   }
   try {
@@ -3750,44 +4079,128 @@ async function fetchRecentCommits(repoSlug) {
   }
 }
 
-async function fetchStartupRemoteData(extCtx, forceRefresh) {
+function readCachedStartupRemoteData(extCtx) {
   const repos = getStartupRepositories();
   const nightlyRepo = getNightlyRepository();
-  const cacheKey = JSON.stringify({ repos, nightlyRepo });
+  const commitsKey = JSON.stringify({ repos });
+  const nightlyKey = JSON.stringify({ nightlyRepo });
+
+  const commitsCache = extCtx.globalState.get(STARTUP_COMMITS_CACHE_KEY, null);
+  const nightlyCache = extCtx.globalState.get(STARTUP_NIGHTLY_CACHE_KEY, null);
+
+  const commitsData = commitsCache
+    && typeof commitsCache === 'object'
+    && commitsCache.key === commitsKey
+    && commitsCache.data
+    ? commitsCache.data
+    : null;
+  const nightlyData = nightlyCache
+    && typeof nightlyCache === 'object'
+    && nightlyCache.key === nightlyKey
+    && nightlyCache.data
+    ? nightlyCache.data
+    : null;
+
+  return {
+    nightlyRepository: nightlyRepo,
+    repositories: repos,
+    commitsByRepo: commitsData && Array.isArray(commitsData.commitsByRepo) ? commitsData.commitsByRepo : [],
+    commitsError: commitsData ? String(commitsData.commitsError || '') : '',
+    commitsFetchedAt: commitsData ? String(commitsData.fetchedAt || '') : '',
+    nightly: nightlyData ? (nightlyData.nightly || null) : null,
+    nightlyError: nightlyData ? String(nightlyData.nightlyError || '') : '',
+    nightlyFetchedAt: nightlyData ? String(nightlyData.fetchedAt || '') : ''
+  };
+}
+
+async function fetchStartupCommitsData(extCtx, forceRefresh) {
+  const repos = getStartupRepositories();
+  const key = JSON.stringify({ repos });
   const nowMs = Date.now();
-  const cached = extCtx.globalState.get(STARTUP_REMOTE_CACHE_KEY, null);
+  const cached = extCtx.globalState.get(STARTUP_COMMITS_CACHE_KEY, null);
   if (!forceRefresh && cached && typeof cached === 'object'
-      && cached.key === cacheKey
-      && Number(cached.fetchedAtMs || 0) > (nowMs - STARTUP_REMOTE_CACHE_TTL_MS)
+      && cached.key === key
+      && Number(cached.fetchedAtMs || 0) > (nowMs - STARTUP_COMMITS_CACHE_TTL_MS)
       && cached.data) {
     return cached.data;
   }
 
-  const nightlyPromise = fetchNightlyRelease(nightlyRepo)
-    .then((nightly) => ({ nightly, nightlyError: '' }))
-    .catch((e) => ({ nightly: null, nightlyError: String(e && e.message ? e.message : e) }));
-  const commitsPromise = Promise.all(repos.map((repo) => fetchRecentCommits(repo)));
+  let commitsByRepo = [];
+  let commitsError = '';
+  try {
+    commitsByRepo = await Promise.all(repos.map((repo) => fetchRecentCommits(repo)));
+  } catch (e) {
+    commitsByRepo = [];
+    commitsError = String(e && e.message ? e.message : e);
+  }
 
-  const [nightlyResult, commitResults] = await Promise.all([nightlyPromise, commitsPromise]);
   const data = {
     fetchedAt: new Date().toISOString(),
-    nightlyRepository: nightlyRepo,
     repositories: repos,
-    nightly: nightlyResult.nightly,
-    nightlyError: nightlyResult.nightlyError,
-    commitsByRepo: commitResults
+    commitsByRepo,
+    commitsError
   };
 
-  await extCtx.globalState.update(STARTUP_REMOTE_CACHE_KEY, {
-    key: cacheKey,
+  await extCtx.globalState.update(STARTUP_COMMITS_CACHE_KEY, {
+    key,
     fetchedAtMs: nowMs,
     data
   });
   return data;
 }
 
-function readRecentSalProjects(extCtx) {
-  const raw = extCtx.globalState.get(RECENT_PROJECTS_KEY, []);
+async function fetchStartupNightlyData(extCtx, forceRefresh, options) {
+  const opts = options || {};
+  const installed = !!opts.installed;
+  const nightlyRepo = getNightlyRepository();
+  const key = JSON.stringify({ nightlyRepo });
+  const nowMs = Date.now();
+  const cached = extCtx.globalState.get(STARTUP_NIGHTLY_CACHE_KEY, null);
+  const hasValidCache = cached
+    && typeof cached === 'object'
+    && cached.key === key
+    && cached.data;
+
+  if (hasValidCache) {
+    const ageMs = Math.max(0, nowMs - Number(cached.fetchedAtMs || 0));
+    // Once SAL is installed, keep nightly checks to at most once per week.
+    if (installed && ageMs < STARTUP_NIGHTLY_INSTALLED_CHECK_TTL_MS) {
+      return cached.data;
+    }
+    if (!installed && !forceRefresh && ageMs < STARTUP_NIGHTLY_CACHE_TTL_MS) {
+      return cached.data;
+    }
+  }
+
+  let nightly = null;
+  let nightlyError = '';
+  try {
+    nightly = await fetchNightlyRelease(nightlyRepo);
+  } catch (e) {
+    nightlyError = String(e && e.message ? e.message : e);
+    if (hasValidCache && cached.data && cached.data.nightly) {
+      return Object.assign({}, cached.data, {
+        nightlyError: nightlyError
+      });
+    }
+  }
+
+  const data = {
+    fetchedAt: new Date().toISOString(),
+    nightlyRepository: nightlyRepo,
+    nightly,
+    nightlyError
+  };
+  await extCtx.globalState.update(STARTUP_NIGHTLY_CACHE_KEY, {
+    key,
+    fetchedAtMs: nowMs,
+    data
+  });
+  return data;
+}
+
+function readRecentSalFiles(extCtx) {
+  const raw = extCtx.globalState.get(RECENT_SAL_FILES_KEY, []);
   if (!Array.isArray(raw)) return [];
   const out = [];
   for (const entry of raw) {
@@ -3797,50 +4210,77 @@ function readRecentSalProjects(extCtx) {
     out.push({
       path: p,
       name: String(entry.name || path.basename(p)),
-      lastOpenedAt: String(entry.lastOpenedAt || ''),
-      lastSalFile: String(entry.lastSalFile || '')
+      workspacePath: String(entry.workspacePath || ''),
+      workspaceName: String(entry.workspaceName || ''),
+      lastTouchedAt: String(entry.lastTouchedAt || ''),
+      lastEvent: String(entry.lastEvent || '')
     });
   }
   out.sort((a, b) => {
-    const ta = a.lastOpenedAt ? Date.parse(a.lastOpenedAt) : 0;
-    const tb = b.lastOpenedAt ? Date.parse(b.lastOpenedAt) : 0;
+    const ta = a.lastTouchedAt ? Date.parse(a.lastTouchedAt) : 0;
+    const tb = b.lastTouchedAt ? Date.parse(b.lastTouchedAt) : 0;
     return tb - ta;
   });
-  return out.slice(0, MAX_RECENT_PROJECTS);
+  return out.slice(0, MAX_RECENT_SAL_FILES);
 }
 
-async function rememberRecentSalProject(extCtx, projectPath, salFilePath) {
-  const absPath = String(projectPath || '').trim();
+async function rememberRecentSalFile(extCtx, filePath, eventType) {
+  const absPath = String(filePath || '').trim();
   if (!absPath) return;
   const now = new Date().toISOString();
-  const existing = readRecentSalProjects(extCtx);
-  const next = [{
+  let workspacePath = '';
+  let workspaceName = '';
+  try {
+    const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(absPath));
+    if (folder && folder.uri && folder.uri.fsPath) {
+      workspacePath = folder.uri.fsPath;
+      workspaceName = folder.name || path.basename(folder.uri.fsPath);
+    }
+  } catch (_) {
+    // ignore workspace resolution failures
+  }
+
+  const existing = readRecentSalFiles(extCtx);
+  const eventName = String(eventType || 'opened');
+  const existingIndex = existing.findIndex((item) => path.resolve(item.path) === path.resolve(absPath));
+  const newEntry = {
     path: absPath,
     name: path.basename(absPath),
-    lastOpenedAt: now,
-    lastSalFile: String(salFilePath || '')
-  }];
-  for (const item of existing) {
-    if (path.resolve(item.path) === path.resolve(absPath)) continue;
-    next.push(item);
+    workspacePath,
+    workspaceName,
+    lastTouchedAt: now,
+    lastEvent: eventName
+  };
+
+  let next = [];
+  if (existingIndex >= 0 && eventName === 'opened') {
+    // Keep ordering stable for open events; save events define "recently updated" priority.
+    next = existing.slice();
+    const prev = next[existingIndex] || {};
+    next[existingIndex] = Object.assign({}, prev, {
+      workspacePath,
+      workspaceName,
+      lastEvent: prev.lastEvent || eventName
+    });
+  } else {
+    next = [newEntry];
+    for (const item of existing) {
+      if (path.resolve(item.path) === path.resolve(absPath)) continue;
+      next.push(item);
+    }
   }
-  await extCtx.globalState.update(RECENT_PROJECTS_KEY, next.slice(0, MAX_RECENT_PROJECTS));
+  await extCtx.globalState.update(RECENT_SAL_FILES_KEY, next.slice(0, MAX_RECENT_SAL_FILES));
   if (SalStartupPanel.currentPanel) {
     SalStartupPanel.currentPanel.postState(false).catch(() => {});
   }
 }
 
-async function maybeTrackRecentSalProject(extCtx, document) {
+async function maybeTrackRecentSalFile(extCtx, document, eventType) {
   if (!document) return;
   if (document.isUntitled) return;
   const isSalDoc = document.languageId === 'sal' || String(document.fileName || '').toLowerCase().endsWith('.sal');
   if (!isSalDoc) return;
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-  const projectPath = workspaceFolder
-    ? workspaceFolder.uri.fsPath
-    : path.dirname(document.fileName);
-  if (!projectPath) return;
-  await rememberRecentSalProject(extCtx, projectPath, document.fileName);
+  await rememberRecentSalFile(extCtx, document.fileName, eventType || 'opened');
 }
 
 function isPathWithin(parentPath, candidatePath) {
@@ -4394,15 +4834,13 @@ class SalStartupPanel {
         await this._postToast('info', `Installed ${result.release.tagName} (${result.asset.name}).`);
       }
     );
-    await this.extCtx.globalState.update(STARTUP_REMOTE_CACHE_KEY, null);
+    await this.extCtx.globalState.update(STARTUP_NIGHTLY_CACHE_KEY, null);
     await this.postState(true);
   }
 
   async _collectState(forceRefresh) {
-    const [remote, local] = await Promise.all([
-      fetchStartupRemoteData(this.extCtx, !!forceRefresh),
-      collectLocalSalStatus(this.extCtx)
-    ]);
+    const local = await collectLocalSalStatus(this.extCtx);
+    const remote = readCachedStartupRemoteData(this.extCtx);
 
     const nightlyBuildDate = remote && remote.nightly ? String(remote.nightly.publishedAt || '') : '';
     const localBuildDate = local ? String(local.buildDate || '') : '';
@@ -4417,12 +4855,23 @@ class SalStartupPanel {
       ? 'configured'
       : (managedPathValid ? 'managed-nightly' : 'path');
     const needsConfiguration = configuredBinPath ? !configuredPathValid : !managedPathValid;
+    const installed = configuredPathValid || managedPathValid;
+    const commitsLoaded = !!((remote && Array.isArray(remote.commitsByRepo) && remote.commitsByRepo.length) || (remote && remote.commitsError));
+    const nightlyLoaded = !!((remote && remote.nightly) || (remote && remote.nightlyError));
 
     return {
       generatedAt: new Date().toISOString(),
       nightlyReleaseUrl: NIGHTLY_RELEASE_WEB_URL,
-      recentProjects: readRecentSalProjects(this.extCtx),
+      recentFiles: readRecentSalFiles(this.extCtx),
       remote,
+      remoteMeta: {
+        commitsLoaded,
+        nightlyLoaded,
+        commitsFetchedAt: remote ? String(remote.commitsFetchedAt || '') : '',
+        nightlyFetchedAt: remote ? String(remote.nightlyFetchedAt || '') : '',
+        installed,
+        nightlyCheckCadenceMs: installed ? STARTUP_NIGHTLY_INSTALLED_CHECK_TTL_MS : STARTUP_NIGHTLY_CACHE_TTL_MS
+      },
       local,
       versionStatus: {
         localBuildDate,
@@ -4440,6 +4889,24 @@ class SalStartupPanel {
     };
   }
 
+  async _loadCommitsFromGitHub(forceRefresh) {
+    await fetchStartupCommitsData(this.extCtx, !!forceRefresh);
+    await this.postState(false);
+  }
+
+  async _loadNightlyFromGitHub(forceRefresh) {
+    const local = await collectLocalSalStatus(this.extCtx);
+    const configuredBinPath = String(local && local.configuredBinPath ? local.configuredBinPath : '');
+    const configuredPathValid = configuredBinPath ? hasSalSmcInBinPath(configuredBinPath) : false;
+    const managedBinPath = local && local.managedInstallation && local.managedInstallation.binPath
+      ? String(local.managedInstallation.binPath)
+      : '';
+    const managedPathValid = managedBinPath ? hasSalSmcInBinPath(managedBinPath) : false;
+    const installed = configuredPathValid || managedPathValid;
+    await fetchStartupNightlyData(this.extCtx, !!forceRefresh, { installed });
+    await this.postState(false);
+  }
+
   async postState(forceRefresh) {
     const state = await this._collectState(!!forceRefresh);
     await this.panel.webview.postMessage({ type: 'state', state });
@@ -4451,6 +4918,12 @@ class SalStartupPanel {
       case 'ready':
       case 'refresh':
         await this.postState(message.type === 'refresh');
+        break;
+      case 'loadCommits':
+        await this._loadCommitsFromGitHub(!!(message && message.forceRefresh));
+        break;
+      case 'loadNightly':
+        await this._loadNightlyFromGitHub(!!(message && message.forceRefresh));
         break;
       case 'openProjectFolder':
         await this._openProjectFolder(message.path);
@@ -4667,17 +5140,17 @@ class SalStartupPanel {
       <button id="warningUpdateBtn" class="small">Update</button>
     </div>
 
-    <details class="panel" open>
-      <summary>Recent SAL Projects</summary>
-      <div id="recentProjects" class="body grid"></div>
+    <details id="recentFilesPanel" class="panel">
+      <summary>Recent SAL Files</summary>
+      <div id="recentFiles" class="body grid"></div>
     </details>
 
-    <details class="panel" open>
+    <details id="commitSummaryPanel" class="panel">
       <summary>Latest Commit Changes</summary>
       <div id="commitSummary" class="body grid"></div>
     </details>
 
-    <details class="panel" open>
+    <details id="releaseNotesPanel" class="panel">
       <summary>Nightly Release Notes</summary>
       <div class="body">
         <div id="releaseMeta" class="small muted"></div>
@@ -4700,7 +5173,9 @@ class SalStartupPanel {
     const setupInstallBtn = el('setupInstallBtn');
     const setupPickBtn = el('setupPickBtn');
     const localInstallInfo = el('localInstallInfo');
-    const recentProjects = el('recentProjects');
+    const commitSummaryPanel = el('commitSummaryPanel');
+    const releaseNotesPanel = el('releaseNotesPanel');
+    const recentFiles = el('recentFiles');
     const commitSummary = el('commitSummary');
     const releaseMeta = el('releaseMeta');
     const releaseSummary = el('releaseSummary');
@@ -4711,6 +5186,8 @@ class SalStartupPanel {
     const pickBinBtn = el('pickBinBtn');
     const openNightlyBtn = el('openNightlyBtn');
     let currentState = null;
+    let commitsRequested = false;
+    let nightlyRequested = false;
 
     function setStatus(message, isError) {
       const msg = String(message || '').trim();
@@ -4732,18 +5209,18 @@ class SalStartupPanel {
       return d.toLocaleString();
     }
 
-    function renderRecentProjects(state) {
-      const projects = (state && state.recentProjects) ? state.recentProjects : [];
-      recentProjects.innerHTML = '';
-      if (!projects.length) {
+    function renderRecentFiles(state) {
+      const files = (state && state.recentFiles) ? state.recentFiles : [];
+      recentFiles.innerHTML = '';
+      if (!files.length) {
         const empty = document.createElement('div');
         empty.className = 'card muted';
-        empty.textContent = 'No SAL projects tracked yet. Open a .sal file in a workspace to populate this list.';
-        recentProjects.appendChild(empty);
+        empty.textContent = 'No recent SAL files yet. Open or save a .sal file to populate this list.';
+        recentFiles.appendChild(empty);
         return;
       }
 
-      for (const project of projects) {
+      for (const file of files) {
         const card = document.createElement('div');
         card.className = 'card';
 
@@ -4751,16 +5228,16 @@ class SalStartupPanel {
         top.className = 'row';
         const left = document.createElement('div');
         const title = document.createElement('strong');
-        title.textContent = project.name || project.path;
+        title.textContent = file.name || file.path;
         const p = document.createElement('div');
         p.className = 'small mono muted';
-        p.textContent = project.path;
+        p.textContent = file.path;
         left.appendChild(title);
         left.appendChild(p);
-        if (project.lastSalFile) {
+        if (file.workspacePath) {
           const f = document.createElement('div');
           f.className = 'small mono muted';
-          f.textContent = 'Last file: ' + project.lastSalFile;
+          f.textContent = 'Workspace: ' + (file.workspaceName || file.workspacePath);
           left.appendChild(f);
         }
 
@@ -4768,36 +5245,54 @@ class SalStartupPanel {
         right.className = 'row';
         const when = document.createElement('span');
         when.className = 'small muted';
-        when.textContent = 'Last opened: ' + formatDate(project.lastOpenedAt);
-        const openFolderBtn = document.createElement('button');
-        openFolderBtn.className = 'small secondary';
-        openFolderBtn.textContent = 'Open Folder';
-        openFolderBtn.addEventListener('click', () => {
-          vscode.postMessage({ type: 'openProjectFolder', path: project.path });
+        const eventLabel = (file.lastEvent === 'saved') ? 'saved' : 'opened';
+        when.textContent = 'Last ' + eventLabel + ': ' + formatDate(file.lastTouchedAt);
+
+        const openFileBtn = document.createElement('button');
+        openFileBtn.className = 'small secondary';
+        openFileBtn.textContent = 'Open File';
+        openFileBtn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'openProjectFile', path: file.path });
         });
         right.appendChild(when);
-        right.appendChild(openFolderBtn);
-        if (project.lastSalFile) {
-          const openFileBtn = document.createElement('button');
-          openFileBtn.className = 'small secondary';
-          openFileBtn.textContent = 'Open File';
-          openFileBtn.addEventListener('click', () => {
-            vscode.postMessage({ type: 'openProjectFile', path: project.lastSalFile });
+        right.appendChild(openFileBtn);
+        if (file.workspacePath) {
+          const openFolderBtn = document.createElement('button');
+          openFolderBtn.className = 'small secondary';
+          openFolderBtn.textContent = 'Open Folder';
+          openFolderBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'openProjectFolder', path: file.workspacePath });
           });
-          right.appendChild(openFileBtn);
+          right.appendChild(openFolderBtn);
         }
 
         top.appendChild(left);
         top.appendChild(right);
         card.appendChild(top);
-        recentProjects.appendChild(card);
+        recentFiles.appendChild(card);
       }
     }
 
     function renderCommitSummary(state) {
       const remote = state ? state.remote : null;
+      const meta = state ? state.remoteMeta : null;
+      const loaded = !!(meta && meta.commitsLoaded);
       const repos = remote && Array.isArray(remote.commitsByRepo) ? remote.commitsByRepo : [];
       commitSummary.innerHTML = '';
+      if (!loaded) {
+        const empty = document.createElement('div');
+        empty.className = 'card muted';
+        empty.textContent = 'Expand this panel to load latest commit data from GitHub.';
+        commitSummary.appendChild(empty);
+        return;
+      }
+      if (remote && remote.commitsError) {
+        const empty = document.createElement('div');
+        empty.className = 'card muted';
+        empty.textContent = 'Failed to load commits: ' + remote.commitsError;
+        commitSummary.appendChild(empty);
+        return;
+      }
       if (!repos.length) {
         const empty = document.createElement('div');
         empty.className = 'card muted';
@@ -4880,11 +5375,26 @@ class SalStartupPanel {
         }
         commitSummary.appendChild(card);
       }
+
+      if (meta && meta.commitsFetchedAt) {
+        const foot = document.createElement('div');
+        foot.className = 'small muted';
+        foot.textContent = 'Last fetched: ' + formatDate(meta.commitsFetchedAt);
+        commitSummary.appendChild(foot);
+      }
     }
 
     function renderRelease(state) {
       const remote = state ? state.remote : null;
+      const meta = state ? state.remoteMeta : null;
       const release = remote ? remote.nightly : null;
+      const loaded = !!(meta && meta.nightlyLoaded);
+      if (!loaded) {
+        releaseMeta.textContent = 'Expand this panel to load nightly release data from GitHub.';
+        releaseSummary.textContent = '';
+        releaseNotes.textContent = '';
+        return;
+      }
       if (remote && remote.nightlyError) {
         releaseMeta.textContent = 'Failed to load nightly release: ' + remote.nightlyError;
         releaseSummary.textContent = '';
@@ -4902,6 +5412,7 @@ class SalStartupPanel {
       parts.push(release.repository || '');
       parts.push(release.tagName || 'nightly');
       if (release.publishedAt) parts.push('published ' + formatDate(release.publishedAt));
+      if (meta && meta.nightlyFetchedAt) parts.push('checked ' + formatDate(meta.nightlyFetchedAt));
       releaseMeta.textContent = parts.filter(Boolean).join(' | ');
       releaseSummary.textContent = release.summary || '';
       releaseNotes.textContent = release.body || 'No release notes text in nightly release.';
@@ -4950,18 +5461,53 @@ class SalStartupPanel {
 
     function render(state) {
       currentState = state;
+      const remoteMeta = state && state.remoteMeta ? state.remoteMeta : null;
+      if (remoteMeta && remoteMeta.commitsLoaded) commitsRequested = true;
+      if (remoteMeta && remoteMeta.nightlyLoaded) nightlyRequested = true;
       renderLocalInstallInfo(state);
       renderSetupWarning(state);
       renderVersionWarning(state);
-      renderRecentProjects(state);
+      renderRecentFiles(state);
       renderCommitSummary(state);
       renderRelease(state);
       setStatus('');
     }
 
+    function requestCommits(forceRefresh) {
+      if (commitsRequested && !forceRefresh) return;
+      commitsRequested = true;
+      setStatus('Loading commit data from GitHub…');
+      vscode.postMessage({ type: 'loadCommits', forceRefresh: !!forceRefresh });
+    }
+
+    function requestNightly(forceRefresh) {
+      if (nightlyRequested && !forceRefresh) return;
+      nightlyRequested = true;
+      setStatus('Loading nightly release data from GitHub…');
+      vscode.postMessage({ type: 'loadNightly', forceRefresh: !!forceRefresh });
+    }
+
+    commitSummaryPanel.addEventListener('toggle', () => {
+      if (commitSummaryPanel.open) {
+        requestCommits(false);
+      }
+    });
+    releaseNotesPanel.addEventListener('toggle', () => {
+      if (releaseNotesPanel.open) {
+        requestNightly(false);
+      }
+    });
+
     refreshBtn.addEventListener('click', () => {
       setStatus('Refreshing startup data…');
       vscode.postMessage({ type: 'refresh' });
+      if (commitSummaryPanel.open) {
+        requestCommits(true);
+      }
+      if (releaseNotesPanel.open) {
+        // Installed setups are still limited to a weekly nightly check.
+        requestNightly(true);
+      }
     });
     installNightlyBtn.addEventListener('click', () => {
       setStatus('Installing/updating SAL nightly build…');
@@ -5201,7 +5747,7 @@ async function updateNightlyCommand(extCtx, outputChannel) {
       },
       async () => installNightlyRelease(extCtx, outputChannel, { configureToolchain: 'always' })
     );
-    await extCtx.globalState.update(STARTUP_REMOTE_CACHE_KEY, null);
+    await extCtx.globalState.update(STARTUP_NIGHTLY_CACHE_KEY, null);
     if (SalStartupPanel.currentPanel) {
       await SalStartupPanel.currentPanel.postState(true);
     }
@@ -5242,22 +5788,6 @@ async function pickToolchainBinPathCommand(extCtx) {
 
   if (SalStartupPanel.currentPanel) {
     await SalStartupPanel.currentPanel.postState(true);
-  }
-}
-
-async function seedRecentProjectsFromWorkspace(extCtx) {
-  const folders = vscode.workspace.workspaceFolders || [];
-  for (const folder of folders) {
-    if (!folder || !folder.uri || !folder.uri.fsPath) continue;
-    try {
-      const pattern = new vscode.RelativePattern(folder, '**/*.sal');
-      const matches = await vscode.workspace.findFiles(pattern, '**/{.git,node_modules}/**', 1);
-      if (matches && matches.length) {
-        await rememberRecentSalProject(extCtx, folder.uri.fsPath, matches[0].fsPath);
-      }
-    } catch (_) {
-      // ignore indexing errors
-    }
   }
 }
 
@@ -5305,7 +5835,7 @@ function activate(context) {
     // Keep open dashboard panels in sync with the active editor.
     if (editor && editor.document) {
       SalRunConfigPanel.forEachOpenPanel((p) => p.postState({ uri: editor.document.uri }).catch(() => {}));
-      maybeTrackRecentSalProject(context, editor.document).catch(() => {});
+      maybeTrackRecentSalFile(context, editor.document, 'opened').catch(() => {});
       if (SalStartupPanel.currentPanel) {
         SalStartupPanel.currentPanel.postState(false).catch(() => {});
       }
@@ -5314,25 +5844,21 @@ function activate(context) {
 
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(updateStatusVisibility));
   context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => {
-    maybeTrackRecentSalProject(context, doc).catch(() => {});
+    maybeTrackRecentSalFile(context, doc, 'opened').catch(() => {});
   }));
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => {
     if (doc) {
       SalRunConfigPanel.forEachOpenPanel((p) => p.postState({ uri: doc.uri }).catch(() => {}));
-      maybeTrackRecentSalProject(context, doc).catch(() => {});
+      maybeTrackRecentSalFile(context, doc, 'saved').catch(() => {});
       if (SalStartupPanel.currentPanel) {
         SalStartupPanel.currentPanel.postState(false).catch(() => {});
       }
     }
   }));
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
-    seedRecentProjectsFromWorkspace(context).catch(() => {});
-  }));
   updateStatusVisibility();
   if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document) {
-    maybeTrackRecentSalProject(context, vscode.window.activeTextEditor.document).catch(() => {});
+    maybeTrackRecentSalFile(context, vscode.window.activeTextEditor.document, 'opened').catch(() => {});
   }
-  seedRecentProjectsFromWorkspace(context).catch(() => {});
 
   // Commands
   context.subscriptions.push(vscode.commands.registerCommand('sal.openStartupPane', (arg) => SalStartupPanel.createOrShow(context, outputChannel, arg)));
@@ -5360,6 +5886,11 @@ function activate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('sal.openSimulator', (arg) => openInteractive(context, 'sim', arg)));
 
   context.subscriptions.push(vscode.commands.registerCommand('sal.configureFlags', configureFlagsCommand));
+
+  // Open startup dashboard as soon as the extension is initialized.
+  setTimeout(() => {
+    SalStartupPanel.createOrShow(context, outputChannel, { forceRefresh: false });
+  }, 120);
 }
 
 function deactivate() {}

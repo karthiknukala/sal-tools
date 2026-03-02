@@ -30,6 +30,7 @@ This extension adds **SAL language support** (syntax highlighting + snippets) an
   - `CONTEXT` declarations (WFC / SMC all‑assertions)
   - `MODULE` declarations (Deadlock / Path Finder / More…)
   - `THEOREM`/`LEMMA`/`CLAIM`/`OBLIGATION` declarations (SMC / BMC / EMC / More…)
+  - Prover runs from CodeLens open a split result view (theorem, invocation, output)
 - **Explorer sidebar view**: “SAL Tools”
 - **Status bar button** (“SAL”) while editing SAL files
 - **Editor title button**: “SAL: Run Checker…”
@@ -40,10 +41,12 @@ This extension adds **SAL language support** (syntax highlighting + snippets) an
   - Stage configs via drag/drop and launch batches
   - Monitor running/completed jobs (status, PID, exit code) and stop active jobs
 - **Startup Dashboard (webview)**:
-  - Recent SAL projects
+  - Recent SAL files (ring buffer of latest 6 open/save events)
   - Latest commit summaries from configured SAL repositories
   - Nightly release notes + local/nightly build-date sync status
   - One-click `Update SAL` action
+  - Opens automatically when the extension initializes
+  - GitHub requests are lazy (on panel expand), with caching to reduce rate-limit pressure
 
 ### Parametric contexts
 If your context is declared like:
@@ -68,6 +71,8 @@ It does **not** auto-install at startup. Use one of:
 
 - `SAL: Update Nightly Build`
 - `SAL: Startup Dashboard…` → install button
+
+After SAL is installed/configured, the startup nightly compatibility check is throttled to at most once per week.
 
 ### 2) Point the extension at your SAL binaries (optional)
 In VSCode Settings, set:

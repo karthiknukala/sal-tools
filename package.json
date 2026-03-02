@@ -12,6 +12,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:sal",
     "onView:salToolsView",
     "onCommand:sal.openStartupPane",
