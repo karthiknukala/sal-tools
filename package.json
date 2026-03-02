@@ -14,8 +14,12 @@
   "activationEvents": [
     "onLanguage:sal",
     "onView:salToolsView",
+    "onCommand:sal.openStartupPane",
+    "onCommand:sal.updateNightly",
+    "onCommand:sal.selectToolchainBinPath",
     "onCommand:sal.runChecker",
     "onCommand:sal.openRunConfig",
+    "onCommand:sal.openRuntimeDashboard",
     "onCommand:sal.configureFlags",
     "onCommand:sal.openSalenv",
     "onCommand:sal.openSimulator",
@@ -63,11 +67,27 @@
     ],
     "commands": [
       {
+        "command": "sal.openStartupPane",
+        "title": "SAL: Startup Dashboard…"
+      },
+      {
+        "command": "sal.updateNightly",
+        "title": "SAL: Update Nightly Build"
+      },
+      {
+        "command": "sal.selectToolchainBinPath",
+        "title": "SAL: Select Toolchain Bin Path…"
+      },
+      {
         "command": "sal.runChecker",
         "title": "SAL: Run Checker\u2026"
       },
       {
         "command": "sal.openRunConfig",
+        "title": "SAL: Configuration Manager\u2026"
+      },
+      {
+        "command": "sal.openRuntimeDashboard",
         "title": "SAL: Runtime Dashboard\u2026"
       },
       {
@@ -150,6 +170,11 @@
           "command": "sal.openRunConfig",
           "when": "editorLangId == sal",
           "group": "navigation@2"
+        },
+        {
+          "command": "sal.openRuntimeDashboard",
+          "when": "editorLangId == sal",
+          "group": "navigation@3"
         }
       ],
       "editor/context": [
@@ -164,9 +189,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "sal.configureFlags",
+          "command": "sal.openRuntimeDashboard",
           "when": "editorLangId == sal",
           "group": "navigation@3"
+        },
+        {
+          "command": "sal.configureFlags",
+          "when": "editorLangId == sal",
+          "group": "navigation@4"
         }
       ],
       "explorer/context": [
@@ -179,6 +209,11 @@
           "command": "sal.openRunConfig",
           "when": "resourceExtname == .sal",
           "group": "navigation@2"
+        },
+        {
+          "command": "sal.openRuntimeDashboard",
+          "when": "resourceExtname == .sal",
+          "group": "navigation@3"
         }
       ]
     },
@@ -347,6 +382,21 @@
           "type": "boolean",
           "default": true,
           "description": "Best-effort parsing of tool output into VSCode diagnostics (Problems panel)."
+        },
+        "sal.startup.nightlyRepository": {
+          "type": "string",
+          "default": "karthiknukala/sal",
+          "description": "GitHub repository (owner/repo) used for the nightly release check and install."
+        },
+        "sal.startup.repositories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "karthiknukala/sal"
+          ],
+          "description": "GitHub repositories (owner/repo) summarized in the startup dashboard commit pane."
         }
       }
     }

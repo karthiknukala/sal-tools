@@ -5,6 +5,8 @@ const vscode = require('vscode');
 const cp = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const https = require('https');
 
 /**
  * Tool specs.
@@ -126,6 +128,15 @@ const INTERACTIVE_TOOLS = {
   salenvSafe: { id: 'salenvSafe', title: 'SALenv Safe (REPL)', exe: 'salenv-safe' },
   sim: { id: 'sim', title: 'Simulator (sal-sim)', exe: 'sal-sim' }
 };
+
+const DEFAULT_NIGHTLY_REPOSITORY = 'karthiknukala/sal';
+const DEFAULT_STARTUP_REPOSITORIES = [DEFAULT_NIGHTLY_REPOSITORY];
+const NIGHTLY_RELEASE_WEB_URL = 'https://github.com/karthiknukala/sal/releases/tag/nightly';
+const STARTUP_REMOTE_CACHE_TTL_MS = 5 * 60 * 1000;
+const STARTUP_REMOTE_CACHE_KEY = 'sal.startup.remoteCache';
+const NIGHTLY_INSTALLATION_STATE_KEY = 'sal.nightly.installation';
+const RECENT_PROJECTS_KEY = 'sal.startup.recentProjects';
+const MAX_RECENT_PROJECTS = 10;
 
 /**
  * Curated flag menu (used by "SAL: Configure Tool Flags…").
@@ -325,8 +336,14 @@ class SalCodeLensProvider {
     }));
 
     lenses.push(new vscode.CodeLens(topRange, {
-      title: 'SAL: Runtime Dashboard…',
+      title: 'SAL: Configuration Manager…',
       command: 'sal.openRunConfig',
+      arguments: [{ uri: document.uri }]
+    }));
+
+    lenses.push(new vscode.CodeLens(topRange, {
+      title: 'SAL: Runtime Dashboard…',
+      command: 'sal.openRuntimeDashboard',
       arguments: [{ uri: document.uri }]
     }));
 
@@ -458,7 +475,9 @@ class SalToolsTreeProvider {
   getChildren(element) {
     if (!element) {
       return [
+        new vscode.TreeItem('Startup Dashboard…', vscode.TreeItemCollapsibleState.None),
         new vscode.TreeItem('Run Checker…', vscode.TreeItemCollapsibleState.None),
+        new vscode.TreeItem('Configuration Manager…', vscode.TreeItemCollapsibleState.None),
         new vscode.TreeItem('Runtime Dashboard…', vscode.TreeItemCollapsibleState.None),
         this._category('Model Checking', [
           this._cmdItem('Symbolic Model Check (sal-smc)', 'sal.runSmc'),
@@ -487,15 +506,25 @@ class SalToolsTreeProvider {
         ]),
         this._cmdItem('Configure Tool Flags…', 'sal.configureFlags')
       ].filter(Boolean).map(item => {
+        if (item.label === 'Startup Dashboard…') {
+          item.command = { command: 'sal.openStartupPane', title: 'Startup Dashboard…' };
+          item.iconPath = new vscode.ThemeIcon('home');
+          item.tooltip = 'Open the SAL startup dashboard.';
+        }
         if (item.label === 'Run Checker…') {
           item.command = { command: 'sal.runChecker', title: 'Run Checker…' };
           item.iconPath = new vscode.ThemeIcon('play');
           item.tooltip = 'Pick a SAL tool and run it on the active file/selection.';
         }
-        if (item.label === 'Runtime Dashboard…') {
-          item.command = { command: 'sal.openRunConfig', title: 'Runtime Dashboard…' };
+        if (item.label === 'Configuration Manager…') {
+          item.command = { command: 'sal.openRunConfig', title: 'Configuration Manager…' };
           item.iconPath = new vscode.ThemeIcon('settings-gear');
-          item.tooltip = 'Open the SAL runtime/configuration dashboard.';
+          item.tooltip = 'Open the SAL configuration manager.';
+        }
+        if (item.label === 'Runtime Dashboard…') {
+          item.command = { command: 'sal.openRuntimeDashboard', title: 'Runtime Dashboard…' };
+          item.iconPath = new vscode.ThemeIcon('pulse');
+          item.tooltip = 'Open the SAL runtime dashboard.';
         }
         return item;
       });
@@ -1338,21 +1367,40 @@ function getNonce() {
 }
 
 class SalRunConfigPanel {
-  static viewType = 'salRunConfig';
-  static currentPanel = undefined;
+  static currentPanels = { config: undefined, runtime: undefined };
 
-  static createOrShow(extCtx, extensionUri, outputChannel, diagnostics, runtimeManager, arg) {
+  static normalizeMode(mode) {
+    return mode === 'runtime' ? 'runtime' : 'config';
+  }
+
+  static viewTypeForMode(mode) {
+    return mode === 'runtime' ? 'salRuntimeDashboard' : 'salConfigManager';
+  }
+
+  static titleForMode(mode) {
+    return mode === 'runtime' ? 'SAL Runtime Dashboard' : 'SAL Configuration Manager';
+  }
+
+  static forEachOpenPanel(fn) {
+    for (const p of Object.values(SalRunConfigPanel.currentPanels)) {
+      if (p) fn(p);
+    }
+  }
+
+  static createOrShow(extCtx, extensionUri, outputChannel, diagnostics, runtimeManager, mode, arg) {
+    const normalizedMode = SalRunConfigPanel.normalizeMode(mode);
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
 
-    if (SalRunConfigPanel.currentPanel) {
-      SalRunConfigPanel.currentPanel.panel.reveal(column);
-      SalRunConfigPanel.currentPanel.postState(arg);
+    const existing = SalRunConfigPanel.currentPanels[normalizedMode];
+    if (existing) {
+      existing.panel.reveal(column);
+      existing.postState(arg);
       return;
     }
 
     const panel = vscode.window.createWebviewPanel(
-      SalRunConfigPanel.viewType,
-      'SAL Runtime Dashboard',
+      SalRunConfigPanel.viewTypeForMode(normalizedMode),
+      SalRunConfigPanel.titleForMode(normalizedMode),
       column || vscode.ViewColumn.Beside,
       {
         enableScripts: true,
@@ -1360,17 +1408,19 @@ class SalRunConfigPanel {
       }
     );
 
-    SalRunConfigPanel.currentPanel = new SalRunConfigPanel(panel, extensionUri, extCtx, outputChannel, diagnostics, runtimeManager);
-    SalRunConfigPanel.currentPanel.postState(arg);
+    const created = new SalRunConfigPanel(panel, extensionUri, extCtx, outputChannel, diagnostics, runtimeManager, normalizedMode);
+    SalRunConfigPanel.currentPanels[normalizedMode] = created;
+    created.postState(arg);
   }
 
-  constructor(panel, extensionUri, extCtx, outputChannel, diagnostics, runtimeManager) {
+  constructor(panel, extensionUri, extCtx, outputChannel, diagnostics, runtimeManager, mode) {
     this.panel = panel;
     this.extensionUri = extensionUri;
     this.extCtx = extCtx;
     this.outputChannel = outputChannel;
     this.diagnostics = diagnostics;
     this.runtimeManager = runtimeManager;
+    this.mode = SalRunConfigPanel.normalizeMode(mode);
     this.lastArg = undefined;
     this.runtimeSubscription = this.runtimeManager.onDidChange(() => {
       this.postState().catch(() => {});
@@ -1399,7 +1449,9 @@ class SalRunConfigPanel {
       this.runtimeSubscription.dispose();
       this.runtimeSubscription = null;
     }
-    SalRunConfigPanel.currentPanel = undefined;
+    if (SalRunConfigPanel.currentPanels[this.mode] === this) {
+      SalRunConfigPanel.currentPanels[this.mode] = undefined;
+    }
     // panel is already disposed by VSCode at this point
   }
 
@@ -1416,6 +1468,12 @@ class SalRunConfigPanel {
         break;
       case 'openOutput':
         this.outputChannel.show(true);
+        break;
+      case 'openConfigManager':
+        await vscode.commands.executeCommand('sal.openRunConfig', message && message.arg ? message.arg : undefined);
+        break;
+      case 'openRuntimeDashboard':
+        await vscode.commands.executeCommand('sal.openRuntimeDashboard', message && message.arg ? message.arg : undefined);
         break;
       case 'saveConfig':
         await this._saveConfigFromWebview(message);
@@ -1717,7 +1775,7 @@ class SalRunConfigPanel {
       lastContextInstantiation,
       savedConfigs: this._readSavedConfigs(),
       runtimeJobs: this.runtimeManager.getSnapshot(),
-      ui: { preset }
+      ui: { preset, mode: this.mode }
     };
   }
 
@@ -1805,6 +1863,11 @@ class SalRunConfigPanel {
 
   _getHtmlForWebview(webview) {
     const nonce = getNonce();
+    const mode = this.mode === 'runtime' ? 'runtime' : 'config';
+    const pageTitle = mode === 'runtime' ? 'SAL Runtime Dashboard' : 'SAL Configuration Manager';
+    const pageSubtitle = mode === 'runtime'
+      ? 'Inspect active solver jobs and launch saved configurations.'
+      : 'Create, edit, and save reusable SAL run configurations.';
 
     // NOTE: We keep everything in one file to make the extension easy to install locally.
     return `<!DOCTYPE html>
@@ -1813,7 +1876,7 @@ class SalRunConfigPanel {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>SAL Runtime Dashboard</title>
+  <title>${pageTitle}</title>
   <style>
     :root {
       --sal-panel-radius: 10px;
@@ -2026,6 +2089,20 @@ class SalRunConfigPanel {
     .note { margin-top: 6px; font-size: 0.95em; opacity: 0.9; }
     .small { font-size: 0.92em; }
     .hr { height: 1px; background: var(--sal-panel-border); margin: 12px 0; }
+    .hero-right {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .hero-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .mode-config .runtime-only { display: none !important; }
+    .mode-runtime .config-only { display: none !important; }
     .mono { font-family: var(--vscode-editor-font-family, ui-monospace, monospace); }
     .config-toolbar {
       display: flex;
@@ -2178,6 +2255,12 @@ class SalRunConfigPanel {
         flex-direction: column;
         align-items: stretch;
       }
+      .hero-right {
+        align-items: stretch;
+      }
+      .hero-actions {
+        justify-content: flex-start;
+      }
       .file-pill {
         max-width: 100%;
       }
@@ -2187,17 +2270,23 @@ class SalRunConfigPanel {
     }
   </style>
 </head>
-<body>
+<body class="mode-${mode}">
   <div class="shell">
   <header class="hero">
     <div>
-      <h2>SAL Runtime Dashboard</h2>
-      <div class="muted small">Manage named configurations and run SAL jobs from one dashboard.</div>
+      <h2>${pageTitle}</h2>
+      <div class="muted small">${pageSubtitle}</div>
     </div>
-    <div id="fileInfo" class="file-pill muted small"></div>
+    <div class="hero-right">
+      <div id="fileInfo" class="file-pill muted small"></div>
+      <div class="hero-actions">
+        <button id="openConfigViewBtn" class="secondary runtime-only">Open Configuration Manager</button>
+        <button id="openRuntimeViewBtn" class="secondary config-only">Open Runtime Dashboard</button>
+      </div>
+    </div>
   </header>
 
-  <details class="panel" open>
+  <details class="panel config-only" open>
     <summary>Configuration Manager</summary>
     <div class="panel-body">
       <div class="row">
@@ -2223,7 +2312,7 @@ class SalRunConfigPanel {
     </div>
   </details>
 
-  <details class="panel" open>
+  <details class="panel config-only" open>
     <summary>Run</summary>
     <div class="panel-body">
     <div class="row">
@@ -2278,7 +2367,7 @@ class SalRunConfigPanel {
     </div>
   </details>
 
-  <details class="panel" open>
+  <details class="panel runtime-only" open>
     <summary>Runtime Dashboard</summary>
     <div class="panel-body">
       <div class="runtime-layout">
@@ -2316,7 +2405,7 @@ class SalRunConfigPanel {
     </div>
   </details>
 
-  <details class="panel" open>
+  <details class="panel config-only" open>
     <summary>Flags</summary>
     <div class="panel-body">
     <div class="row">
@@ -2366,7 +2455,7 @@ class SalRunConfigPanel {
     </div>
   </details>
 
-  <details class="panel">
+  <details class="panel config-only">
     <summary>Environment & Behavior</summary>
     <div class="panel-body">
     <div class="row">
@@ -2413,7 +2502,7 @@ class SalRunConfigPanel {
     </div>
   </details>
 
-  <div id="status" class="status muted">Loading…</div>
+  <div id="status" class="status muted" style="display:none"></div>
   </div>
 
   <script nonce="${nonce}">
@@ -2480,12 +2569,22 @@ class SalRunConfigPanel {
     const runtimeJobs = el('runtimeJobs');
     const clearFinishedJobsBtn = el('clearFinishedJobsBtn');
     const refreshRuntimeBtn = el('refreshRuntimeBtn');
+    const openConfigViewBtn = el('openConfigViewBtn');
+    const openRuntimeViewBtn = el('openRuntimeViewBtn');
 
     const splitLines = (text) => String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const joinLines = (arr) => (arr && arr.length) ? arr.join('\n') : '';
 
     function setStatus(msg, isError=false) {
-      status.textContent = msg;
+      const text = String(msg || '').trim();
+      if (!text) {
+        status.textContent = '';
+        status.classList.remove('error');
+        status.style.display = 'none';
+        return;
+      }
+      status.style.display = 'block';
+      status.textContent = text;
       status.classList.toggle('error', !!isError);
     }
 
@@ -3144,10 +3243,17 @@ class SalRunConfigPanel {
       renderRuntimeConfigPool();
       renderRuntimeStaging();
       renderRuntimeJobs();
-      setStatus('Ready.');
+      setStatus('');
     }
 
     // --- UI event wiring ---
+
+    openConfigViewBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openConfigManager', arg: lastState && lastState.document ? { uri: lastState.document.uri } : undefined });
+    });
+    openRuntimeViewBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openRuntimeDashboard', arg: lastState && lastState.document ? { uri: lastState.document.uri } : undefined });
+    });
 
     configName.addEventListener('input', () => {
       if (!draft) return;
@@ -3424,6 +3530,1483 @@ class SalRunConfigPanel {
   }
 }
 
+function normalizeRepoSlug(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const cleaned = raw.replace(/^https?:\/\/github\.com\//i, '').replace(/^\/+|\/+$/g, '');
+  const parts = cleaned.split('/');
+  if (parts.length < 2 || !parts[0] || !parts[1]) return '';
+  return `${parts[0]}/${parts[1]}`;
+}
+
+function splitRepoSlug(repoSlug) {
+  const normalized = normalizeRepoSlug(repoSlug);
+  if (!normalized) return null;
+  const parts = normalized.split('/');
+  if (parts.length !== 2) return null;
+  return { owner: parts[0], repo: parts[1], slug: normalized };
+}
+
+function getNightlyRepository() {
+  const cfg = getSalConfiguration();
+  const configured = normalizeRepoSlug(cfg.get('startup.nightlyRepository') || '');
+  return configured || DEFAULT_NIGHTLY_REPOSITORY;
+}
+
+function getStartupRepositories() {
+  const cfg = getSalConfiguration();
+  const raw = cfg.get('startup.repositories');
+  const repos = Array.isArray(raw) ? raw.map(normalizeRepoSlug).filter(Boolean) : [];
+  if (!repos.length) return DEFAULT_STARTUP_REPOSITORIES.slice();
+  return dedupePreserveOrder(repos);
+}
+
+function githubHeaders(extra) {
+  return Object.assign({
+    'User-Agent': 'sal-tools-vscode',
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  }, extra || {});
+}
+
+function requestBuffer(url, headers, redirectsLeft) {
+  const budget = Number.isInteger(redirectsLeft) ? redirectsLeft : 5;
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method: 'GET', headers: headers || {} }, (res) => {
+      const status = res.statusCode || 0;
+      if ([301, 302, 303, 307, 308].includes(status) && res.headers && res.headers.location) {
+        if (budget <= 0) {
+          res.resume();
+          reject(new Error('Too many redirects.'));
+          return;
+        }
+        const nextUrl = new URL(String(res.headers.location), url).toString();
+        res.resume();
+        requestBuffer(nextUrl, headers, budget - 1).then(resolve, reject);
+        return;
+      }
+
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      res.on('end', () => {
+        resolve({
+          statusCode: status,
+          headers: res.headers || {},
+          body: Buffer.concat(chunks)
+        });
+      });
+      res.on('error', reject);
+    });
+
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function downloadToFile(url, destinationPath, headers, redirectsLeft) {
+  const budget = Number.isInteger(redirectsLeft) ? redirectsLeft : 5;
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method: 'GET', headers: headers || {} }, (res) => {
+      const status = res.statusCode || 0;
+      if ([301, 302, 303, 307, 308].includes(status) && res.headers && res.headers.location) {
+        if (budget <= 0) {
+          res.resume();
+          reject(new Error('Too many redirects while downloading asset.'));
+          return;
+        }
+        const nextUrl = new URL(String(res.headers.location), url).toString();
+        res.resume();
+        downloadToFile(nextUrl, destinationPath, headers, budget - 1).then(resolve, reject);
+        return;
+      }
+
+      if (status < 200 || status >= 300) {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on('end', () => {
+          const msg = Buffer.concat(chunks).toString('utf8').trim() || `HTTP ${status}`;
+          reject(new Error(`Download failed (${status}): ${msg}`));
+        });
+        return;
+      }
+
+      const stream = fs.createWriteStream(destinationPath);
+      stream.on('error', (e) => reject(e));
+      stream.on('finish', () => resolve());
+      res.pipe(stream);
+    });
+
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function githubGetJson(url) {
+  const res = await requestBuffer(url, githubHeaders(), 5);
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    const raw = res.body ? res.body.toString('utf8').trim() : '';
+    throw new Error(`GitHub API request failed (${res.statusCode}): ${raw || 'No response body.'}`);
+  }
+  try {
+    return JSON.parse(res.body.toString('utf8'));
+  } catch (e) {
+    throw new Error(`Failed to parse GitHub API response: ${e.message || e}`);
+  }
+}
+
+function firstLine(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const line = raw.split(/\r?\n/).find((x) => String(x).trim()) || '';
+  return String(line).trim();
+}
+
+function summarizeReleaseBody(markdownBody) {
+  const lines = String(markdownBody || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith('#'));
+  if (!lines.length) return 'No release notes text in nightly release.';
+  return lines.slice(0, 6).join(' ');
+}
+
+async function fetchNightlyRelease(repoSlug) {
+  const parsed = splitRepoSlug(repoSlug);
+  if (!parsed) {
+    throw new Error(`Invalid nightly repository '${repoSlug}'. Use owner/repo.`);
+  }
+  const url = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/releases/tags/nightly`;
+  const release = await githubGetJson(url);
+  return {
+    repository: parsed.slug,
+    tagName: String(release.tag_name || 'nightly'),
+    name: String(release.name || release.tag_name || 'nightly'),
+    publishedAt: String(release.published_at || ''),
+    body: String(release.body || ''),
+    summary: summarizeReleaseBody(release.body || ''),
+    htmlUrl: String(release.html_url || NIGHTLY_RELEASE_WEB_URL),
+    assets: Array.isArray(release.assets) ? release.assets.map((asset) => ({
+      id: String(asset.id || ''),
+      name: String(asset.name || ''),
+      browserDownloadUrl: String(asset.browser_download_url || ''),
+      contentType: String(asset.content_type || ''),
+      size: Number(asset.size || 0),
+      downloadCount: Number(asset.download_count || 0),
+      updatedAt: String(asset.updated_at || ''),
+      createdAt: String(asset.created_at || '')
+    })) : []
+  };
+}
+
+async function fetchCommitDetail(repoSlug, sha) {
+  const parsed = splitRepoSlug(repoSlug);
+  if (!parsed) return null;
+  const cleanSha = String(sha || '').trim();
+  if (!cleanSha) return null;
+  const url = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits/${cleanSha}`;
+  try {
+    const detail = await githubGetJson(url);
+    const stats = detail && detail.stats ? detail.stats : {};
+    return {
+      filesChanged: Number(stats.total || 0),
+      additions: Number(stats.additions || 0),
+      deletions: Number(stats.deletions || 0)
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchRecentCommits(repoSlug) {
+  const parsed = splitRepoSlug(repoSlug);
+  if (!parsed) {
+    return { repo: String(repoSlug || ''), error: 'Invalid repository slug.', commits: [] };
+  }
+
+  const url = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/commits?per_page=4`;
+  try {
+    const commits = await githubGetJson(url);
+    const list = Array.isArray(commits) ? commits.slice(0, 4) : [];
+    const enriched = await Promise.all(list.map(async (commit) => {
+      const sha = String(commit && commit.sha ? commit.sha : '');
+      const detail = await fetchCommitDetail(parsed.slug, sha);
+      const commitInfo = commit && commit.commit ? commit.commit : {};
+      const authorInfo = commitInfo.author || {};
+      const fallbackUrl = (parsed.slug && sha) ? `https://github.com/${parsed.slug}/commit/${sha}` : '';
+      return {
+        sha: sha ? sha.slice(0, 7) : '',
+        fullSha: sha,
+        url: String(commit && commit.html_url ? commit.html_url : fallbackUrl),
+        message: firstLine(commitInfo.message || ''),
+        author: String(authorInfo.name || ''),
+        date: String(authorInfo.date || ''),
+        stats: detail
+      };
+    }));
+    return { repo: parsed.slug, error: '', commits: enriched };
+  } catch (e) {
+    return { repo: parsed.slug, error: String(e && e.message ? e.message : e), commits: [] };
+  }
+}
+
+async function fetchStartupRemoteData(extCtx, forceRefresh) {
+  const repos = getStartupRepositories();
+  const nightlyRepo = getNightlyRepository();
+  const cacheKey = JSON.stringify({ repos, nightlyRepo });
+  const nowMs = Date.now();
+  const cached = extCtx.globalState.get(STARTUP_REMOTE_CACHE_KEY, null);
+  if (!forceRefresh && cached && typeof cached === 'object'
+      && cached.key === cacheKey
+      && Number(cached.fetchedAtMs || 0) > (nowMs - STARTUP_REMOTE_CACHE_TTL_MS)
+      && cached.data) {
+    return cached.data;
+  }
+
+  const nightlyPromise = fetchNightlyRelease(nightlyRepo)
+    .then((nightly) => ({ nightly, nightlyError: '' }))
+    .catch((e) => ({ nightly: null, nightlyError: String(e && e.message ? e.message : e) }));
+  const commitsPromise = Promise.all(repos.map((repo) => fetchRecentCommits(repo)));
+
+  const [nightlyResult, commitResults] = await Promise.all([nightlyPromise, commitsPromise]);
+  const data = {
+    fetchedAt: new Date().toISOString(),
+    nightlyRepository: nightlyRepo,
+    repositories: repos,
+    nightly: nightlyResult.nightly,
+    nightlyError: nightlyResult.nightlyError,
+    commitsByRepo: commitResults
+  };
+
+  await extCtx.globalState.update(STARTUP_REMOTE_CACHE_KEY, {
+    key: cacheKey,
+    fetchedAtMs: nowMs,
+    data
+  });
+  return data;
+}
+
+function readRecentSalProjects(extCtx) {
+  const raw = extCtx.globalState.get(RECENT_PROJECTS_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const p = String(entry.path || '').trim();
+    if (!p) continue;
+    out.push({
+      path: p,
+      name: String(entry.name || path.basename(p)),
+      lastOpenedAt: String(entry.lastOpenedAt || ''),
+      lastSalFile: String(entry.lastSalFile || '')
+    });
+  }
+  out.sort((a, b) => {
+    const ta = a.lastOpenedAt ? Date.parse(a.lastOpenedAt) : 0;
+    const tb = b.lastOpenedAt ? Date.parse(b.lastOpenedAt) : 0;
+    return tb - ta;
+  });
+  return out.slice(0, MAX_RECENT_PROJECTS);
+}
+
+async function rememberRecentSalProject(extCtx, projectPath, salFilePath) {
+  const absPath = String(projectPath || '').trim();
+  if (!absPath) return;
+  const now = new Date().toISOString();
+  const existing = readRecentSalProjects(extCtx);
+  const next = [{
+    path: absPath,
+    name: path.basename(absPath),
+    lastOpenedAt: now,
+    lastSalFile: String(salFilePath || '')
+  }];
+  for (const item of existing) {
+    if (path.resolve(item.path) === path.resolve(absPath)) continue;
+    next.push(item);
+  }
+  await extCtx.globalState.update(RECENT_PROJECTS_KEY, next.slice(0, MAX_RECENT_PROJECTS));
+  if (SalStartupPanel.currentPanel) {
+    SalStartupPanel.currentPanel.postState(false).catch(() => {});
+  }
+}
+
+async function maybeTrackRecentSalProject(extCtx, document) {
+  if (!document) return;
+  if (document.isUntitled) return;
+  const isSalDoc = document.languageId === 'sal' || String(document.fileName || '').toLowerCase().endsWith('.sal');
+  if (!isSalDoc) return;
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const projectPath = workspaceFolder
+    ? workspaceFolder.uri.fsPath
+    : path.dirname(document.fileName);
+  if (!projectPath) return;
+  await rememberRecentSalProject(extCtx, projectPath, document.fileName);
+}
+
+function isPathWithin(parentPath, candidatePath) {
+  const parent = path.resolve(String(parentPath || ''));
+  const child = path.resolve(String(candidatePath || ''));
+  if (!parent || !child) return false;
+  if (parent === child) return true;
+  const rel = path.relative(parent, child);
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function getManagedNightlyInstallRoot(extCtx) {
+  return path.join(extCtx.globalStorageUri.fsPath, 'nightly');
+}
+
+function isManagedNightlyBinPath(extCtx, binPath) {
+  if (!binPath) return false;
+  return isPathWithin(getManagedNightlyInstallRoot(extCtx), binPath);
+}
+
+function hasSalSmcInBinPath(binPath) {
+  const dir = String(binPath || '').trim();
+  if (!dir) return false;
+  const candidates = process.platform === 'win32'
+    ? ['sal-smc.exe', 'sal-smc.cmd', 'sal-smc.bat', 'sal-smc']
+    : ['sal-smc'];
+  return candidates.some((name) => fs.existsSync(path.join(dir, name)));
+}
+
+function pickNightlyAsset(assets) {
+  const list = Array.isArray(assets) ? assets : [];
+  if (!list.length) return null;
+
+  const osTokens = process.platform === 'win32'
+    ? ['windows', 'win32', 'win', 'mingw']
+    : process.platform === 'darwin'
+      ? ['darwin', 'mac', 'osx', 'macos']
+      : ['linux', 'gnu', 'ubuntu'];
+  const archTokens = process.arch === 'arm64'
+    ? ['arm64', 'aarch64']
+    : ['x86_64', 'amd64', 'x64'];
+  const extWeight = (name) => {
+    const lower = name.toLowerCase();
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 3;
+    if (lower.endsWith('.zip')) return 2;
+    if (lower.endsWith('.tar')) return 1;
+    return 0;
+  };
+
+  const candidates = list
+    .filter((asset) => asset && asset.browserDownloadUrl && asset.name)
+    .filter((asset) => !/source\s*code/i.test(String(asset.name)));
+
+  if (!candidates.length) return null;
+
+  const scored = candidates.map((asset) => {
+    const name = String(asset.name || '').toLowerCase();
+    let score = extWeight(name);
+    if (osTokens.some((token) => name.includes(token))) score += 5;
+    if (archTokens.some((token) => name.includes(token))) score += 3;
+    if (name.includes('nightly')) score += 1;
+    return { asset, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].asset;
+}
+
+function execFilePromise(command, args, opts) {
+  return new Promise((resolve, reject) => {
+    cp.execFile(command, args, opts || {}, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+    });
+  });
+}
+
+async function extractArchive(archivePath, destinationDir) {
+  const lower = String(archivePath || '').toLowerCase();
+  if (lower.endsWith('.zip')) {
+    try {
+      await execFilePromise('tar', ['-xf', archivePath, '-C', destinationDir], {});
+      return;
+    } catch (tarErr) {
+      if (process.platform === 'win32') {
+        const escapedArchive = String(archivePath).replace(/'/g, "''");
+        const escapedDest = String(destinationDir).replace(/'/g, "''");
+        await execFilePromise('powershell', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          `Expand-Archive -LiteralPath '${escapedArchive}' -DestinationPath '${escapedDest}' -Force`
+        ], {});
+        return;
+      }
+      try {
+        await execFilePromise('unzip', ['-oq', archivePath, '-d', destinationDir], {});
+      } catch (unzipErr) {
+        throw new Error(`Failed to extract ZIP archive (${tarErr.message || tarErr}; ${unzipErr.message || unzipErr}).`);
+      }
+      return;
+    }
+  }
+
+  if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+    await execFilePromise('tar', ['-xzf', archivePath, '-C', destinationDir], {});
+    return;
+  }
+
+  if (lower.endsWith('.tar')) {
+    await execFilePromise('tar', ['-xf', archivePath, '-C', destinationDir], {});
+    return;
+  }
+
+  throw new Error(`Unsupported nightly asset format: ${archivePath}`);
+}
+
+function findExecutableBinPath(rootDir) {
+  const start = String(rootDir || '').trim();
+  if (!start || !fs.existsSync(start)) return '';
+  const targetNames = process.platform === 'win32'
+    ? new Set(['sal-smc.exe', 'sal-smc.cmd', 'sal-smc.bat', 'sal-smc'])
+    : new Set(['sal-smc']);
+
+  const queue = [start];
+  let visitedDirs = 0;
+  while (queue.length) {
+    const dir = queue.shift();
+    if (!dir) continue;
+    visitedDirs += 1;
+    if (visitedDirs > 6000) break;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isFile()) {
+        if (targetNames.has(entry.name.toLowerCase())) {
+          return dir;
+        }
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (entry.name === '.git' || entry.name === '__MACOSX') continue;
+        queue.push(full);
+      }
+    }
+  }
+
+  return '';
+}
+
+function pruneManagedNightlyInstalls(installRoot, keepPath) {
+  if (!installRoot || !fs.existsSync(installRoot)) return;
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(installRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => {
+        const full = path.join(installRoot, entry.name);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(full).mtimeMs;
+        } catch (_) {
+          mtimeMs = 0;
+        }
+        return { full, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  } catch (_) {
+    return;
+  }
+
+  const keep = new Set([path.resolve(String(keepPath || ''))]);
+  let keepCount = 0;
+  for (const d of dirs) {
+    const resolved = path.resolve(d.full);
+    if (keep.has(resolved)) {
+      keepCount += 1;
+      continue;
+    }
+    if (keepCount < 2) {
+      keepCount += 1;
+      continue;
+    }
+    try {
+      fs.rmSync(d.full, { recursive: true, force: true });
+    } catch (_) {
+      // ignore cleanup issues
+    }
+  }
+}
+
+async function installNightlyRelease(extCtx, outputChannel, options) {
+  const opts = options || {};
+  const configureMode = opts.configureToolchain || 'auto'; // auto | always | never
+  const nightlyRepo = getNightlyRepository();
+  const release = await fetchNightlyRelease(nightlyRepo);
+  const asset = pickNightlyAsset(release.assets);
+  if (!asset) {
+    throw new Error(`No downloadable nightly asset found for ${process.platform}/${process.arch}.`);
+  }
+
+  const globalStorage = extCtx.globalStorageUri.fsPath;
+  fs.mkdirSync(globalStorage, { recursive: true });
+  const managedRoot = getManagedNightlyInstallRoot(extCtx);
+  fs.mkdirSync(managedRoot, { recursive: true });
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sal-nightly-'));
+  const archivePath = path.join(tempRoot, asset.name);
+  const unpackDir = path.join(tempRoot, 'unpacked');
+  fs.mkdirSync(unpackDir, { recursive: true });
+
+  try {
+    outputChannel.appendLine(`[nightly] Downloading ${asset.name} from ${asset.browserDownloadUrl}`);
+    await downloadToFile(asset.browserDownloadUrl, archivePath, githubHeaders({ Accept: 'application/octet-stream' }), 5);
+    outputChannel.appendLine(`[nightly] Extracting ${asset.name}`);
+    await extractArchive(archivePath, unpackDir);
+
+    const installDirName = `nightly-${Date.now()}`;
+    const installDir = path.join(managedRoot, installDirName);
+    fs.mkdirSync(installDir, { recursive: true });
+    fs.cpSync(unpackDir, installDir, { recursive: true });
+
+    const finalBinPath = findExecutableBinPath(installDir);
+    if (!finalBinPath) {
+      throw new Error('Downloaded nightly archive does not contain sal-smc.');
+    }
+
+    const cfg = getSalConfiguration();
+    const currentBinPath = String(cfg.get('toolchain.binPath') || '').trim();
+    const shouldConfigure = configureMode === 'always'
+      || (configureMode === 'auto' && (!currentBinPath || isManagedNightlyBinPath(extCtx, currentBinPath)));
+    if (shouldConfigure) {
+      await cfg.update('toolchain.binPath', finalBinPath, vscode.ConfigurationTarget.Global);
+      await cfg.update('toolchain.prependBinPathToPATH', true, vscode.ConfigurationTarget.Global);
+    }
+
+    const installState = {
+      repository: nightlyRepo,
+      tagName: release.tagName,
+      publishedAt: release.publishedAt,
+      releaseName: release.name,
+      htmlUrl: release.htmlUrl,
+      assetName: asset.name,
+      binPath: finalBinPath,
+      installedAt: new Date().toISOString(),
+      configuredAsToolchain: shouldConfigure
+    };
+    await extCtx.globalState.update(NIGHTLY_INSTALLATION_STATE_KEY, installState);
+    pruneManagedNightlyInstalls(managedRoot, installDir);
+
+    return { release, asset, binPath: finalBinPath, configured: shouldConfigure };
+  } finally {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    } catch (_) {
+      // ignore
+    }
+  }
+}
+
+function parseDateFromText(text) {
+  const raw = String(text || '');
+  if (!raw.trim()) return '';
+
+  const iso = raw.match(/\b(20\d{2}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?\b/);
+  if (iso && iso[0]) {
+    const d = new Date(iso[0]);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+
+  const named = raw.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+20\d{2}\b/i);
+  if (named && named[0]) {
+    const d = new Date(named[0]);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+
+  const slash = raw.match(/\b(\d{1,2}\/\d{1,2}\/20\d{2})\b/);
+  if (slash && slash[1]) {
+    const d = new Date(slash[1]);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+
+  return '';
+}
+
+function runCommandCapture(command, args, options) {
+  const opts = options || {};
+  const timeoutMs = Number(opts.timeoutMs || 5000);
+  return new Promise((resolve) => {
+    let proc = null;
+    let finished = false;
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    try {
+      proc = cp.spawn(command, args || [], {
+        cwd: opts.cwd,
+        env: opts.env || process.env,
+        shell: process.platform === 'win32'
+      });
+    } catch (e) {
+      resolve({
+        ok: false,
+        code: null,
+        stdout: '',
+        stderr: '',
+        error: String(e && e.message ? e.message : e),
+        timedOut: false
+      });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (finished) return;
+      timedOut = true;
+      try { proc.kill(); } catch (_) { /* ignore */ }
+    }, timeoutMs);
+
+    proc.stdout.on('data', (buf) => { stdout += buf.toString('utf8'); });
+    proc.stderr.on('data', (buf) => { stderr += buf.toString('utf8'); });
+
+    proc.on('error', (err) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        code: null,
+        stdout,
+        stderr,
+        error: String(err && err.message ? err.message : err),
+        timedOut
+      });
+    });
+
+    proc.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        code,
+        stdout,
+        stderr,
+        error: '',
+        timedOut
+      });
+    });
+  });
+}
+
+async function probeLocalSalBuild(binPath) {
+  const cleanBinPath = String(binPath || '').trim();
+  const executable = resolveExecutable('sal-smc', cleanBinPath || undefined);
+  if (cleanBinPath && !fs.existsSync(executable)) {
+    return {
+      executablePath: executable,
+      versionText: '',
+      buildDate: '',
+      buildDateSource: '',
+      available: false
+    };
+  }
+
+  const probes = [['--version'], ['-V']];
+  for (const argv of probes) {
+    const res = await runCommandCapture(executable, argv, { timeoutMs: 4500 });
+    if (res.error) continue;
+    const combined = `${res.stdout || ''}\n${res.stderr || ''}`.trim();
+    const first = firstLine(combined);
+    const parsedDate = parseDateFromText(combined);
+    if (first || parsedDate) {
+      return {
+        executablePath: executable,
+        versionText: first,
+        buildDate: parsedDate,
+        buildDateSource: parsedDate ? 'version-output' : '',
+        available: true
+      };
+    }
+  }
+
+  if (cleanBinPath && fs.existsSync(executable)) {
+    try {
+      const stat = fs.statSync(executable);
+      return {
+        executablePath: executable,
+        versionText: '',
+        buildDate: stat.mtime.toISOString(),
+        buildDateSource: 'binary-mtime',
+        available: true
+      };
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  return {
+    executablePath: executable,
+    versionText: '',
+    buildDate: '',
+    buildDateSource: '',
+    available: !cleanBinPath
+  };
+}
+
+async function collectLocalSalStatus(extCtx) {
+  const cfg = getSalConfiguration();
+  const configuredBinPath = String(cfg.get('toolchain.binPath') || '').trim();
+  const installStateRaw = extCtx.globalState.get(NIGHTLY_INSTALLATION_STATE_KEY, null);
+  const installState = installStateRaw && typeof installStateRaw === 'object' ? installStateRaw : null;
+
+  let effectiveBinPath = configuredBinPath;
+  if (!effectiveBinPath && installState && installState.binPath) {
+    effectiveBinPath = String(installState.binPath);
+  }
+
+  const probe = await probeLocalSalBuild(effectiveBinPath);
+  let buildDate = probe.buildDate || '';
+  let buildDateSource = probe.buildDateSource || '';
+
+  if (installState && effectiveBinPath && installState.binPath
+      && path.resolve(String(installState.binPath)) === path.resolve(String(effectiveBinPath))
+      && installState.publishedAt) {
+    buildDate = String(installState.publishedAt);
+    buildDateSource = 'managed-nightly';
+  }
+
+  return {
+    configuredBinPath,
+    effectiveBinPath,
+    executablePath: probe.executablePath,
+    versionText: probe.versionText,
+    buildDate,
+    buildDateSource,
+    available: probe.available,
+    managedInstallation: installState
+  };
+}
+
+function isLocalBuildOutOfDate(localBuildDate, nightlyBuildDate) {
+  const localTs = localBuildDate ? Date.parse(localBuildDate) : NaN;
+  const nightlyTs = nightlyBuildDate ? Date.parse(nightlyBuildDate) : NaN;
+  if (!Number.isFinite(localTs) || !Number.isFinite(nightlyTs)) return false;
+  return localTs + 60 * 1000 < nightlyTs;
+}
+
+class SalStartupPanel {
+  static currentPanel = undefined;
+
+  static createOrShow(extCtx, outputChannel, arg) {
+    const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
+    const existing = SalStartupPanel.currentPanel;
+    if (existing) {
+      existing.panel.reveal(column);
+      existing.postState(!!(arg && arg.forceRefresh)).catch(() => {});
+      return existing;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      'salStartupPanel',
+      'SAL Startup',
+      column || vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+    const created = new SalStartupPanel(panel, extCtx, outputChannel);
+    SalStartupPanel.currentPanel = created;
+    created.postState(!!(arg && arg.forceRefresh)).catch(() => {});
+    return created;
+  }
+
+  constructor(panel, extCtx, outputChannel) {
+    this.panel = panel;
+    this.extCtx = extCtx;
+    this.outputChannel = outputChannel;
+
+    this.panel.onDidDispose(() => this.dispose(), null, this.extCtx.subscriptions);
+    this.panel.webview.onDidReceiveMessage(
+      (msg) => this._onMessage(msg).catch((e) => {
+        const err = String(e && e.message ? e.message : e);
+        this._postToast('error', err).catch(() => {});
+      }),
+      null,
+      this.extCtx.subscriptions
+    );
+
+    this.panel.webview.html = this._getHtmlForWebview(this.panel.webview);
+  }
+
+  dispose() {
+    if (SalStartupPanel.currentPanel === this) {
+      SalStartupPanel.currentPanel = undefined;
+    }
+  }
+
+  async _postToast(level, message) {
+    await this.panel.webview.postMessage({
+      type: 'toast',
+      level: String(level || 'info'),
+      message: String(message || '')
+    });
+  }
+
+  async _openProjectFolder(projectPath) {
+    const raw = String(projectPath || '').trim();
+    if (!raw) return;
+    if (!fs.existsSync(raw)) {
+      throw new Error(`Project folder not found: ${raw}`);
+    }
+    const uri = vscode.Uri.file(raw);
+    await vscode.commands.executeCommand('vscode.openFolder', uri, true);
+  }
+
+  async _openProjectFile(filePath) {
+    const raw = String(filePath || '').trim();
+    if (!raw) return;
+    if (!fs.existsSync(raw)) {
+      await this._openProjectFolder(path.dirname(raw));
+      return;
+    }
+    const uri = vscode.Uri.file(raw);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, { preview: false });
+  }
+
+  async _updateNightlyBuild() {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        cancellable: false,
+        title: 'SAL: Updating nightly build'
+      },
+      async () => {
+        const result = await installNightlyRelease(this.extCtx, this.outputChannel, { configureToolchain: 'always' });
+        await this._postToast('info', `Installed ${result.release.tagName} (${result.asset.name}).`);
+      }
+    );
+    await this.extCtx.globalState.update(STARTUP_REMOTE_CACHE_KEY, null);
+    await this.postState(true);
+  }
+
+  async _collectState(forceRefresh) {
+    const [remote, local] = await Promise.all([
+      fetchStartupRemoteData(this.extCtx, !!forceRefresh),
+      collectLocalSalStatus(this.extCtx)
+    ]);
+
+    const nightlyBuildDate = remote && remote.nightly ? String(remote.nightly.publishedAt || '') : '';
+    const localBuildDate = local ? String(local.buildDate || '') : '';
+    const outOfDate = isLocalBuildOutOfDate(localBuildDate, nightlyBuildDate);
+    const hasManagedInstall = !!(local && local.managedInstallation && local.managedInstallation.binPath);
+    const configuredBinPath = local ? String(local.configuredBinPath || '') : '';
+    const configuredPathValid = configuredBinPath ? hasSalSmcInBinPath(configuredBinPath) : false;
+    const managedBinPath = hasManagedInstall ? String(local.managedInstallation.binPath || '') : '';
+    const managedPathValid = managedBinPath ? hasSalSmcInBinPath(managedBinPath) : false;
+    const currentInstallPath = configuredBinPath || managedBinPath || (local ? String(local.effectiveBinPath || '') : '');
+    const currentInstallSource = configuredBinPath
+      ? 'configured'
+      : (managedPathValid ? 'managed-nightly' : 'path');
+    const needsConfiguration = configuredBinPath ? !configuredPathValid : !managedPathValid;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      nightlyReleaseUrl: NIGHTLY_RELEASE_WEB_URL,
+      recentProjects: readRecentSalProjects(this.extCtx),
+      remote,
+      local,
+      versionStatus: {
+        localBuildDate,
+        nightlyBuildDate,
+        outOfDate,
+        hasManagedInstall,
+        configuredBinPath,
+        configuredPathValid,
+        managedBinPath,
+        managedPathValid,
+        currentInstallPath,
+        currentInstallSource,
+        needsConfiguration
+      }
+    };
+  }
+
+  async postState(forceRefresh) {
+    const state = await this._collectState(!!forceRefresh);
+    await this.panel.webview.postMessage({ type: 'state', state });
+  }
+
+  async _onMessage(message) {
+    if (!message || typeof message.type !== 'string') return;
+    switch (message.type) {
+      case 'ready':
+      case 'refresh':
+        await this.postState(message.type === 'refresh');
+        break;
+      case 'openProjectFolder':
+        await this._openProjectFolder(message.path);
+        break;
+      case 'openProjectFile':
+        await this._openProjectFile(message.path);
+        break;
+      case 'pickBinPath':
+        await pickToolchainBinPathCommand(this.extCtx);
+        break;
+      case 'openExternal':
+        if (message.url) {
+          await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
+        }
+        break;
+      case 'updateNightly':
+        await this._updateNightlyBuild();
+        break;
+      default:
+        break;
+    }
+  }
+
+  _getHtmlForWebview(webview) {
+    const nonce = getNonce();
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <title>SAL Startup</title>
+  <style>
+    :root {
+      --sal-radius: 10px;
+      --sal-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+      --sal-bg: var(--vscode-editorWidget-background);
+      --sal-card-bg: var(--vscode-editor-background);
+      --sal-warning-bg: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent);
+    }
+    body {
+      margin: 0;
+      padding: 14px;
+      color: var(--vscode-foreground);
+      background:
+        radial-gradient(circle at 90% -10%, rgba(120,120,120,0.12), transparent 40%),
+        radial-gradient(circle at 0% 0%, rgba(120,120,120,0.08), transparent 28%),
+        var(--vscode-editor-background);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+    }
+    .shell {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .hero {
+      border: 1px solid var(--sal-border);
+      border-radius: var(--sal-radius);
+      background: linear-gradient(135deg, rgba(127,127,127,0.14), rgba(127,127,127,0.05));
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .hero-title {
+      margin: 0;
+      font-size: 1.2em;
+    }
+    .hero-sub {
+      margin-top: 4px;
+      opacity: 0.85;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    button {
+      padding: 6px 11px;
+      border-radius: 6px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    button.small {
+      padding: 2px 7px;
+      font-size: 0.9em;
+    }
+    .warning {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border: 1px solid var(--vscode-editorWarning-foreground);
+      border-radius: 8px;
+      background: var(--sal-warning-bg);
+      padding: 8px 10px;
+    }
+    .panel {
+      border: 1px solid var(--sal-border);
+      border-radius: var(--sal-radius);
+      background: var(--sal-bg);
+      overflow: hidden;
+    }
+    .panel summary {
+      cursor: pointer;
+      user-select: none;
+      font-weight: 650;
+      padding: 10px 12px;
+      background: linear-gradient(180deg, rgba(127,127,127,0.12), rgba(127,127,127,0.04));
+    }
+    .panel .body {
+      padding: 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .card {
+      border: 1px solid var(--sal-border);
+      border-radius: 8px;
+      background: var(--sal-card-bg);
+      padding: 9px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .muted { opacity: 0.8; }
+    .small { font-size: 0.9em; }
+    .mono { font-family: var(--vscode-editor-font-family, ui-monospace, monospace); }
+    .commit-list {
+      margin-top: 8px;
+      display: grid;
+      gap: 7px;
+    }
+    .commit-line {
+      border: 1px dashed var(--sal-border);
+      border-radius: 8px;
+      padding: 7px 8px;
+      background: var(--vscode-editorWidget-background);
+    }
+    .release-notes {
+      max-height: 320px;
+      overflow: auto;
+      white-space: pre-wrap;
+      border: 1px solid var(--sal-border);
+      border-radius: 8px;
+      background: var(--sal-card-bg);
+      padding: 10px;
+      margin-top: 8px;
+    }
+    .status {
+      display: none;
+      border: 1px solid var(--sal-border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: var(--sal-bg);
+    }
+    .status.error {
+      border-color: var(--vscode-errorForeground);
+      color: var(--vscode-errorForeground);
+    }
+    @media (max-width: 860px) {
+      .hero {
+        flex-direction: column;
+      }
+      .actions {
+        justify-content: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <h2 class="hero-title">SAL Startup</h2>
+        <div class="hero-sub small">Recent projects, latest repository changes, and nightly release status.</div>
+        <div id="localInstallInfo" class="small muted" style="margin-top:6px;"></div>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn" class="secondary">Refresh</button>
+        <button id="installNightlyBtn">Install / Update Nightly</button>
+        <button id="pickBinBtn" class="secondary">Use Existing SAL…</button>
+        <button id="openNightlyBtn" class="secondary">Nightly Release</button>
+      </div>
+    </header>
+
+    <div id="setupBox" class="warning">
+      <div id="setupText" class="small"></div>
+      <div class="row">
+        <button id="setupInstallBtn" class="small">Install Nightly</button>
+        <button id="setupPickBtn" class="small secondary">Select Existing SAL</button>
+      </div>
+    </div>
+
+    <div id="warningBox" class="warning">
+      <div id="warningText" class="small"></div>
+      <button id="warningUpdateBtn" class="small">Update</button>
+    </div>
+
+    <details class="panel" open>
+      <summary>Recent SAL Projects</summary>
+      <div id="recentProjects" class="body grid"></div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Latest Commit Changes</summary>
+      <div id="commitSummary" class="body grid"></div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Nightly Release Notes</summary>
+      <div class="body">
+        <div id="releaseMeta" class="small muted"></div>
+        <div id="releaseSummary" class="small" style="margin-top:6px;"></div>
+        <div id="releaseNotes" class="release-notes small mono"></div>
+      </div>
+    </details>
+
+    <div id="status" class="status small"></div>
+  </div>
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    const el = (id) => document.getElementById(id);
+    const warningBox = el('warningBox');
+    const warningText = el('warningText');
+    const warningUpdateBtn = el('warningUpdateBtn');
+    const setupBox = el('setupBox');
+    const setupText = el('setupText');
+    const setupInstallBtn = el('setupInstallBtn');
+    const setupPickBtn = el('setupPickBtn');
+    const localInstallInfo = el('localInstallInfo');
+    const recentProjects = el('recentProjects');
+    const commitSummary = el('commitSummary');
+    const releaseMeta = el('releaseMeta');
+    const releaseSummary = el('releaseSummary');
+    const releaseNotes = el('releaseNotes');
+    const status = el('status');
+    const refreshBtn = el('refreshBtn');
+    const installNightlyBtn = el('installNightlyBtn');
+    const pickBinBtn = el('pickBinBtn');
+    const openNightlyBtn = el('openNightlyBtn');
+    let currentState = null;
+
+    function setStatus(message, isError) {
+      const msg = String(message || '').trim();
+      if (!msg) {
+        status.style.display = 'none';
+        status.textContent = '';
+        status.classList.remove('error');
+        return;
+      }
+      status.style.display = 'block';
+      status.textContent = msg;
+      status.classList.toggle('error', !!isError);
+    }
+
+    function formatDate(iso) {
+      if (!iso) return '-';
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return String(iso);
+      return d.toLocaleString();
+    }
+
+    function renderRecentProjects(state) {
+      const projects = (state && state.recentProjects) ? state.recentProjects : [];
+      recentProjects.innerHTML = '';
+      if (!projects.length) {
+        const empty = document.createElement('div');
+        empty.className = 'card muted';
+        empty.textContent = 'No SAL projects tracked yet. Open a .sal file in a workspace to populate this list.';
+        recentProjects.appendChild(empty);
+        return;
+      }
+
+      for (const project of projects) {
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        const top = document.createElement('div');
+        top.className = 'row';
+        const left = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = project.name || project.path;
+        const p = document.createElement('div');
+        p.className = 'small mono muted';
+        p.textContent = project.path;
+        left.appendChild(title);
+        left.appendChild(p);
+        if (project.lastSalFile) {
+          const f = document.createElement('div');
+          f.className = 'small mono muted';
+          f.textContent = 'Last file: ' + project.lastSalFile;
+          left.appendChild(f);
+        }
+
+        const right = document.createElement('div');
+        right.className = 'row';
+        const when = document.createElement('span');
+        when.className = 'small muted';
+        when.textContent = 'Last opened: ' + formatDate(project.lastOpenedAt);
+        const openFolderBtn = document.createElement('button');
+        openFolderBtn.className = 'small secondary';
+        openFolderBtn.textContent = 'Open Folder';
+        openFolderBtn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'openProjectFolder', path: project.path });
+        });
+        right.appendChild(when);
+        right.appendChild(openFolderBtn);
+        if (project.lastSalFile) {
+          const openFileBtn = document.createElement('button');
+          openFileBtn.className = 'small secondary';
+          openFileBtn.textContent = 'Open File';
+          openFileBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'openProjectFile', path: project.lastSalFile });
+          });
+          right.appendChild(openFileBtn);
+        }
+
+        top.appendChild(left);
+        top.appendChild(right);
+        card.appendChild(top);
+        recentProjects.appendChild(card);
+      }
+    }
+
+    function renderCommitSummary(state) {
+      const remote = state ? state.remote : null;
+      const repos = remote && Array.isArray(remote.commitsByRepo) ? remote.commitsByRepo : [];
+      commitSummary.innerHTML = '';
+      if (!repos.length) {
+        const empty = document.createElement('div');
+        empty.className = 'card muted';
+        empty.textContent = 'No commit data available.';
+        commitSummary.appendChild(empty);
+        return;
+      }
+
+      for (const repo of repos) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const header = document.createElement('div');
+        header.className = 'row';
+        const h = document.createElement('strong');
+        h.textContent = repo.repo || 'repository';
+        header.appendChild(h);
+        card.appendChild(header);
+
+        if (repo.error) {
+          const err = document.createElement('div');
+          err.className = 'small muted';
+          err.textContent = 'Failed to load commits: ' + repo.error;
+          card.appendChild(err);
+          commitSummary.appendChild(card);
+          continue;
+        }
+
+        const list = document.createElement('div');
+        list.className = 'commit-list';
+        const commits = Array.isArray(repo.commits) ? repo.commits : [];
+        if (!commits.length) {
+          const none = document.createElement('div');
+          none.className = 'small muted';
+          none.textContent = 'No recent commits.';
+          card.appendChild(none);
+        } else {
+          for (const c of commits) {
+            const row = document.createElement('div');
+            row.className = 'commit-line';
+            const r1 = document.createElement('div');
+            r1.className = 'row';
+            const msg = document.createElement('strong');
+            msg.textContent = c.message || c.sha || 'commit';
+            if (c.url) {
+              msg.style.cursor = 'pointer';
+              msg.title = 'Open commit in browser';
+              msg.addEventListener('click', () => {
+                vscode.postMessage({ type: 'openExternal', url: c.url });
+              });
+            }
+            r1.appendChild(msg);
+            const actions = document.createElement('div');
+            if (c.url) {
+              const open = document.createElement('button');
+              open.className = 'small secondary';
+              open.textContent = c.sha ? ('Commit ' + c.sha) : 'Open Commit';
+              open.addEventListener('click', () => {
+                vscode.postMessage({ type: 'openExternal', url: c.url });
+              });
+              actions.appendChild(open);
+            }
+            r1.appendChild(actions);
+            row.appendChild(r1);
+
+            const detail = document.createElement('div');
+            detail.className = 'small muted';
+            const parts = [];
+            if (c.author) parts.push(c.author);
+            if (c.date) parts.push(formatDate(c.date));
+            if (c.stats) {
+              parts.push('files: ' + String(c.stats.filesChanged || 0));
+              parts.push('+' + String(c.stats.additions || 0));
+              parts.push('-' + String(c.stats.deletions || 0));
+            }
+            detail.textContent = parts.join(' | ');
+            row.appendChild(detail);
+            list.appendChild(row);
+          }
+          card.appendChild(list);
+        }
+        commitSummary.appendChild(card);
+      }
+    }
+
+    function renderRelease(state) {
+      const remote = state ? state.remote : null;
+      const release = remote ? remote.nightly : null;
+      if (remote && remote.nightlyError) {
+        releaseMeta.textContent = 'Failed to load nightly release: ' + remote.nightlyError;
+        releaseSummary.textContent = '';
+        releaseNotes.textContent = '';
+        return;
+      }
+      if (!release) {
+        releaseMeta.textContent = 'Nightly release data unavailable.';
+        releaseSummary.textContent = '';
+        releaseNotes.textContent = '';
+        return;
+      }
+
+      const parts = [];
+      parts.push(release.repository || '');
+      parts.push(release.tagName || 'nightly');
+      if (release.publishedAt) parts.push('published ' + formatDate(release.publishedAt));
+      releaseMeta.textContent = parts.filter(Boolean).join(' | ');
+      releaseSummary.textContent = release.summary || '';
+      releaseNotes.textContent = release.body || 'No release notes text in nightly release.';
+    }
+
+    function renderLocalInstallInfo(state) {
+      const info = state && state.versionStatus ? state.versionStatus : null;
+      if (!info) {
+        localInstallInfo.textContent = '';
+        return;
+      }
+      const pathText = info.currentInstallPath ? info.currentInstallPath : 'PATH lookup';
+      const source = info.currentInstallSource ? info.currentInstallSource : 'path';
+      localInstallInfo.textContent = 'Current SAL location: ' + pathText + ' (' + source + ')';
+    }
+
+    function renderSetupWarning(state) {
+      const info = state && state.versionStatus ? state.versionStatus : null;
+      if (!info || !info.needsConfiguration) {
+        setupBox.style.display = 'none';
+        setupText.textContent = '';
+        return;
+      }
+      if (info.configuredBinPath && !info.configuredPathValid) {
+        setupText.textContent = 'Configured SAL path does not contain sal-smc. Select a valid SAL bin folder or install nightly.';
+      } else {
+        setupText.textContent = 'SAL is not configured yet. Install nightly or point to an existing SAL bin folder.';
+      }
+      setupBox.style.display = 'flex';
+    }
+
+    function renderVersionWarning(state) {
+      const status = state && state.versionStatus ? state.versionStatus : null;
+      const local = state && state.local ? state.local : null;
+      if (!status || !status.outOfDate) {
+        warningBox.style.display = 'none';
+        warningText.textContent = '';
+        return;
+      }
+      const localDate = status.localBuildDate ? formatDate(status.localBuildDate) : 'unknown';
+      const nightlyDate = status.nightlyBuildDate ? formatDate(status.nightlyBuildDate) : 'unknown';
+      const where = local && local.effectiveBinPath ? (' (' + local.effectiveBinPath + ')') : '';
+      warningText.textContent = 'Local SAL build is out of sync with nightly. Local: ' + localDate + ' | Nightly: ' + nightlyDate + where;
+      warningBox.style.display = 'flex';
+    }
+
+    function render(state) {
+      currentState = state;
+      renderLocalInstallInfo(state);
+      renderSetupWarning(state);
+      renderVersionWarning(state);
+      renderRecentProjects(state);
+      renderCommitSummary(state);
+      renderRelease(state);
+      setStatus('');
+    }
+
+    refreshBtn.addEventListener('click', () => {
+      setStatus('Refreshing startup data…');
+      vscode.postMessage({ type: 'refresh' });
+    });
+    installNightlyBtn.addEventListener('click', () => {
+      setStatus('Installing/updating SAL nightly build…');
+      vscode.postMessage({ type: 'updateNightly' });
+    });
+    pickBinBtn.addEventListener('click', () => {
+      setStatus('Choose a SAL bin folder…');
+      vscode.postMessage({ type: 'pickBinPath' });
+    });
+    warningUpdateBtn.addEventListener('click', () => {
+      setStatus('Updating SAL nightly build…');
+      vscode.postMessage({ type: 'updateNightly' });
+    });
+    setupInstallBtn.addEventListener('click', () => {
+      setStatus('Installing/updating SAL nightly build…');
+      vscode.postMessage({ type: 'updateNightly' });
+    });
+    setupPickBtn.addEventListener('click', () => {
+      setStatus('Choose a SAL bin folder…');
+      vscode.postMessage({ type: 'pickBinPath' });
+    });
+    openNightlyBtn.addEventListener('click', () => {
+      const release = currentState && currentState.remote ? currentState.remote.nightly : null;
+      const url = release && release.htmlUrl ? release.htmlUrl : (currentState ? currentState.nightlyReleaseUrl : '');
+      if (url) vscode.postMessage({ type: 'openExternal', url });
+    });
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (!msg) return;
+      if (msg.type === 'state') {
+        render(msg.state);
+      } else if (msg.type === 'toast') {
+        const isError = String(msg.level || '').toLowerCase() === 'error';
+        setStatus(msg.message || '', isError);
+      }
+    });
+
+    vscode.postMessage({ type: 'ready' });
+  </script>
+</body>
+</html>`;
+  }
+}
+
 // ---------- Commands ----------
 
 async function runCheckerQuickPick(extCtx, outputChannel, diagnostics, arg) {
@@ -3608,6 +5191,76 @@ async function configureFlagsCommand() {
   }
 }
 
+async function updateNightlyCommand(extCtx, outputChannel) {
+  try {
+    const result = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        cancellable: false,
+        title: 'SAL: Updating nightly build'
+      },
+      async () => installNightlyRelease(extCtx, outputChannel, { configureToolchain: 'always' })
+    );
+    await extCtx.globalState.update(STARTUP_REMOTE_CACHE_KEY, null);
+    if (SalStartupPanel.currentPanel) {
+      await SalStartupPanel.currentPanel.postState(true);
+    }
+    vscode.window.showInformationMessage(
+      `SAL: Updated nightly build (${result.release.tagName}, ${result.asset.name}).`
+    );
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    outputChannel.appendLine(`[nightly] update failed: ${msg}`);
+    vscode.window.showErrorMessage(`SAL: Nightly update failed: ${msg}`);
+  }
+}
+
+async function pickToolchainBinPathCommand(extCtx) {
+  const selected = await vscode.window.showOpenDialog({
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'Use this folder as SAL bin path'
+  });
+  if (!selected || !selected.length) return;
+
+  const chosenPath = selected[0].fsPath;
+  if (!chosenPath) return;
+
+  if (!hasSalSmcInBinPath(chosenPath)) {
+    const action = await vscode.window.showWarningMessage(
+      `No sal-smc executable found under ${chosenPath}. Use this path anyway?`,
+      'Use Anyway'
+    );
+    if (action !== 'Use Anyway') return;
+  }
+
+  const cfg = getSalConfiguration();
+  await cfg.update('toolchain.binPath', chosenPath, vscode.ConfigurationTarget.Global);
+  await cfg.update('toolchain.prependBinPathToPATH', true, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`SAL: toolchain bin path set to ${chosenPath}`);
+
+  if (SalStartupPanel.currentPanel) {
+    await SalStartupPanel.currentPanel.postState(true);
+  }
+}
+
+async function seedRecentProjectsFromWorkspace(extCtx) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  for (const folder of folders) {
+    if (!folder || !folder.uri || !folder.uri.fsPath) continue;
+    try {
+      const pattern = new vscode.RelativePattern(folder, '**/*.sal');
+      const matches = await vscode.workspace.findFiles(pattern, '**/{.git,node_modules}/**', 1);
+      if (matches && matches.length) {
+        await rememberRecentSalProject(extCtx, folder.uri.fsPath, matches[0].fsPath);
+      }
+    } catch (_) {
+      // ignore indexing errors
+    }
+  }
+}
+
 // ---------- activate/deactivate ----------
 
 function activate(context) {
@@ -3649,23 +5302,45 @@ function activate(context) {
       status.hide();
     }
 
-    // Keep the Run Configuration panel's file index in sync with the active editor.
-    if (SalRunConfigPanel.currentPanel && editor && editor.document) {
-      SalRunConfigPanel.currentPanel.postState({ uri: editor.document.uri });
+    // Keep open dashboard panels in sync with the active editor.
+    if (editor && editor.document) {
+      SalRunConfigPanel.forEachOpenPanel((p) => p.postState({ uri: editor.document.uri }).catch(() => {}));
+      maybeTrackRecentSalProject(context, editor.document).catch(() => {});
+      if (SalStartupPanel.currentPanel) {
+        SalStartupPanel.currentPanel.postState(false).catch(() => {});
+      }
     }
   };
 
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(updateStatusVisibility));
+  context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((doc) => {
+    maybeTrackRecentSalProject(context, doc).catch(() => {});
+  }));
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => {
-    if (SalRunConfigPanel.currentPanel && doc) {
-      SalRunConfigPanel.currentPanel.postState({ uri: doc.uri });
+    if (doc) {
+      SalRunConfigPanel.forEachOpenPanel((p) => p.postState({ uri: doc.uri }).catch(() => {}));
+      maybeTrackRecentSalProject(context, doc).catch(() => {});
+      if (SalStartupPanel.currentPanel) {
+        SalStartupPanel.currentPanel.postState(false).catch(() => {});
+      }
     }
   }));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    seedRecentProjectsFromWorkspace(context).catch(() => {});
+  }));
   updateStatusVisibility();
+  if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document) {
+    maybeTrackRecentSalProject(context, vscode.window.activeTextEditor.document).catch(() => {});
+  }
+  seedRecentProjectsFromWorkspace(context).catch(() => {});
 
   // Commands
+  context.subscriptions.push(vscode.commands.registerCommand('sal.openStartupPane', (arg) => SalStartupPanel.createOrShow(context, outputChannel, arg)));
+  context.subscriptions.push(vscode.commands.registerCommand('sal.updateNightly', () => updateNightlyCommand(context, outputChannel)));
+  context.subscriptions.push(vscode.commands.registerCommand('sal.selectToolchainBinPath', () => pickToolchainBinPathCommand(context)));
   context.subscriptions.push(vscode.commands.registerCommand('sal.runChecker', (arg) => runCheckerQuickPick(context, outputChannel, diagnostics, arg)));
-  context.subscriptions.push(vscode.commands.registerCommand('sal.openRunConfig', (arg) => SalRunConfigPanel.createOrShow(context, context.extensionUri, outputChannel, diagnostics, runtimeManager, arg)));
+  context.subscriptions.push(vscode.commands.registerCommand('sal.openRunConfig', (arg) => SalRunConfigPanel.createOrShow(context, context.extensionUri, outputChannel, diagnostics, runtimeManager, 'config', arg)));
+  context.subscriptions.push(vscode.commands.registerCommand('sal.openRuntimeDashboard', (arg) => SalRunConfigPanel.createOrShow(context, context.extensionUri, outputChannel, diagnostics, runtimeManager, 'runtime', arg)));
   context.subscriptions.push(vscode.commands.registerCommand('sal.runWfc', (arg) => runCliTool(context, outputChannel, diagnostics, TOOLS.wfc, arg)));
   context.subscriptions.push(vscode.commands.registerCommand('sal.runSmc', (arg) => runCliTool(context, outputChannel, diagnostics, TOOLS.smc, arg)));
   context.subscriptions.push(vscode.commands.registerCommand('sal.runBmc', (arg) => runCliTool(context, outputChannel, diagnostics, TOOLS.bmc, arg)));

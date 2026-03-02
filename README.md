@@ -33,11 +33,17 @@ This extension adds **SAL language support** (syntax highlighting + snippets) an
 - **Explorer sidebar view**: “SAL Tools”
 - **Status bar button** (“SAL”) while editing SAL files
 - **Editor title button**: “SAL: Run Checker…”
-- **Runtime Dashboard (webview)**:
+- **Configuration Manager (webview)**:
   - Manage named run configurations (`+ New`, save/update/delete)
   - Edit the active configuration (tool + target + flags + env)
+- **Runtime Dashboard (webview)**:
   - Stage configs via drag/drop and launch batches
   - Monitor running/completed jobs (status, PID, exit code) and stop active jobs
+- **Startup Dashboard (webview)**:
+  - Recent SAL projects
+  - Latest commit summaries from configured SAL repositories
+  - Nightly release notes + local/nightly build-date sync status
+  - One-click `Update SAL` action
 
 ### Parametric contexts
 If your context is declared like:
@@ -54,9 +60,16 @@ END
 ## Setup
 
 ### 1) Install SAL
-Install/unpack SAL on your machine and make sure the SAL tools are runnable from a terminal.
+The extension can install the nightly build from:
 
-### 2) Point the extension at your SAL binaries (recommended)
+- `https://github.com/karthiknukala/sal/releases/tag/nightly`
+
+It does **not** auto-install at startup. Use one of:
+
+- `SAL: Update Nightly Build`
+- `SAL: Startup Dashboard…` → install button
+
+### 2) Point the extension at your SAL binaries (optional)
 In VSCode Settings, set:
 
 - `sal.toolchain.binPath` → directory containing `sal-smc`, `sal-bmc`, etc.
@@ -70,6 +83,10 @@ Example:
 ```
 
 If you don’t set `sal.toolchain.binPath`, the extension will rely on your `PATH`.
+
+You can also pick a folder interactively via:
+
+- `SAL: Select Toolchain Bin Path…`
 
 ### 3) SALPATH
 The extension automatically prepends the **active file’s directory** to `SALPATH` for each run, so tools can find the context.
@@ -90,9 +107,11 @@ You can also set arbitrary env vars via:
    - The “SAL Tools” view (Explorer sidebar)
    - Status bar “SAL” button
    - Command palette: `SAL: Run Checker…`
+   - Command palette: `SAL: Configuration Manager…`
    - Command palette: `SAL: Runtime Dashboard…`
+   - Command palette: `SAL: Startup Dashboard…`
 
-The Runtime Dashboard is also available from the editor title menu and the SAL Tools view.
+Both views are available from the editor title menu and the SAL Tools view.
 
 Tool output is streamed into the **Output** panel under **“SAL”**.
 
@@ -122,6 +141,9 @@ Common pattern:
   - `prop: THEOREM ...`
 - Diagnostics parsing is **best-effort**. You can disable it:
   - `sal.diagnostics.enable: false`
+- Startup dashboard data source settings:
+  - `sal.startup.nightlyRepository` (default: `karthiknukala/sal`)
+  - `sal.startup.repositories` (default: `[ "karthiknukala/sal" ]`)
 
 ## Development / packaging
 
