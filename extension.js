@@ -4310,18 +4310,51 @@ function hasSalSmcInBinPath(binPath) {
   return candidates.some((name) => fs.existsSync(path.join(dir, name)));
 }
 
-function pickNightlyAsset(assets) {
+function detectSupportedMacInstallTarget() {
+  if (process.platform !== 'darwin') {
+    throw new Error(
+      `Nightly install is supported only on macOS (Apple Silicon/Intel). Detected ${process.platform}/${process.arch}.`
+    );
+  }
+  if (process.arch === 'arm64') {
+    return {
+      platformLabel: 'macOS',
+      archLabel: 'Apple Silicon',
+      arch: 'arm64',
+      archTokens: ['arm64', 'aarch64', 'apple-silicon', 'applesilicon'],
+      universalTokens: ['universal2', 'universal']
+    };
+  }
+  if (process.arch === 'x64') {
+    return {
+      platformLabel: 'macOS',
+      archLabel: 'Intel',
+      arch: 'x64',
+      archTokens: ['x86_64', 'amd64', 'x64', 'intel'],
+      universalTokens: ['universal2', 'universal']
+    };
+  }
+  throw new Error(
+    `Nightly install supports only Apple Silicon (arm64) or Intel (x64) Macs. Detected darwin/${process.arch}.`
+  );
+}
+
+function describeNightlyAssets(assets) {
+  const names = (Array.isArray(assets) ? assets : [])
+    .map((asset) => String(asset && asset.name ? asset.name : '').trim())
+    .filter(Boolean);
+  return names.length ? names.join(', ') : 'none';
+}
+
+function pickNightlyAsset(assets, target) {
   const list = Array.isArray(assets) ? assets : [];
   if (!list.length) return null;
 
-  const osTokens = process.platform === 'win32'
-    ? ['windows', 'win32', 'win', 'mingw']
-    : process.platform === 'darwin'
-      ? ['darwin', 'mac', 'osx', 'macos']
-      : ['linux', 'gnu', 'ubuntu'];
-  const archTokens = process.arch === 'arm64'
-    ? ['arm64', 'aarch64']
-    : ['x86_64', 'amd64', 'x64'];
+  const macTokens = ['darwin', 'macos', 'mac', 'osx'];
+  const nonMacTokens = ['windows', 'win32', 'mingw', 'linux', 'gnu', 'ubuntu'];
+  const archTokens = Array.isArray(target && target.archTokens) ? target.archTokens : [];
+  const universalTokens = Array.isArray(target && target.universalTokens) ? target.universalTokens : [];
+
   const extWeight = (name) => {
     const lower = name.toLowerCase();
     if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 3;
@@ -4336,17 +4369,48 @@ function pickNightlyAsset(assets) {
 
   if (!candidates.length) return null;
 
-  const scored = candidates.map((asset) => {
+  const scored = [];
+  for (const asset of candidates) {
     const name = String(asset.name || '').toLowerCase();
-    let score = extWeight(name);
-    if (osTokens.some((token) => name.includes(token))) score += 5;
-    if (archTokens.some((token) => name.includes(token))) score += 3;
-    if (name.includes('nightly')) score += 1;
-    return { asset, score };
-  });
+    const downloadUrl = String(asset.browserDownloadUrl || '').toLowerCase();
+    const text = `${name} ${downloadUrl}`;
+    const hasMacToken = macTokens.some((token) => text.includes(token));
+    const hasNonMacToken = nonMacTokens.some((token) => text.includes(token));
+    const hasArchToken = archTokens.some((token) => text.includes(token));
+    const hasUniversalToken = universalTokens.some((token) => text.includes(token));
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0].asset;
+    if (hasNonMacToken) continue;
+
+    let score = extWeight(name);
+    if (hasMacToken) score += 8;
+    if (hasArchToken) score += 8;
+    if (hasUniversalToken) score += 5;
+    if (name.includes('nightly')) score += 1;
+
+    scored.push({
+      asset,
+      score,
+      hasMacToken,
+      hasArchToken,
+      hasUniversalToken
+    });
+  }
+
+  if (!scored.length) return null;
+
+  const pickBest = (predicate) => {
+    const subset = scored.filter(predicate);
+    if (!subset.length) return null;
+    subset.sort((a, b) => b.score - a.score);
+    return subset[0].asset;
+  };
+
+  return pickBest((c) => c.hasMacToken && c.hasArchToken)
+    || pickBest((c) => c.hasMacToken && c.hasUniversalToken)
+    || pickBest((c) => !c.hasMacToken && c.hasArchToken)
+    || pickBest((c) => !c.hasMacToken && c.hasUniversalToken)
+    || pickBest((c) => c.hasMacToken)
+    || null;
 }
 
 function execFilePromise(command, args, opts) {
@@ -4489,10 +4553,13 @@ async function installNightlyRelease(extCtx, outputChannel, options) {
   const opts = options || {};
   const configureMode = opts.configureToolchain || 'auto'; // auto | always | never
   const nightlyRepo = getNightlyRepository();
+  const installTarget = detectSupportedMacInstallTarget();
   const release = await fetchNightlyRelease(nightlyRepo);
-  const asset = pickNightlyAsset(release.assets);
+  const asset = pickNightlyAsset(release.assets, installTarget);
   if (!asset) {
-    throw new Error(`No downloadable nightly asset found for ${process.platform}/${process.arch}.`);
+    throw new Error(
+      `No macOS nightly asset found for ${installTarget.archLabel} (${process.arch}). Available assets: ${describeNightlyAssets(release.assets)}.`
+    );
   }
 
   const globalStorage = extCtx.globalStorageUri.fsPath;
@@ -4506,6 +4573,7 @@ async function installNightlyRelease(extCtx, outputChannel, options) {
   fs.mkdirSync(unpackDir, { recursive: true });
 
   try {
+    outputChannel.appendLine(`[nightly] Target platform: ${installTarget.platformLabel} (${installTarget.archLabel})`);
     outputChannel.appendLine(`[nightly] Downloading ${asset.name} from ${asset.browserDownloadUrl}`);
     await downloadToFile(asset.browserDownloadUrl, archivePath, githubHeaders({ Accept: 'application/octet-stream' }), 5);
     outputChannel.appendLine(`[nightly] Extracting ${asset.name}`);

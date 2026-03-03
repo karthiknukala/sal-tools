@@ -67,6 +67,13 @@ The extension can install the nightly build from:
 
 - `https://github.com/karthiknukala/sal/releases/tag/nightly`
 
+Nightly auto-install currently supports only macOS on:
+
+- Apple Silicon (`arm64`)
+- Intel (`x64`)
+
+On unsupported platforms/architectures, install is blocked with an error.
+
 It does **not** auto-install at startup. Use one of:
 
 - `SAL: Update Nightly Build`
