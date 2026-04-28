@@ -1,8 +1,8 @@
 {
   "name": "sal-tools",
   "displayName": "SAL Tools",
-  "description": "Language support and one-click tool integration for the SAL (Symbolic Analysis Laboratory) model checker.",
-  "version": "0.2.0",
+  "description": "Minimal SAL syntax highlighting and GitHub release installer.",
+  "version": "0.1.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"
@@ -12,31 +12,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onLanguage:sal",
-    "onView:salToolsView",
-    "onCommand:sal.openStartupPane",
-    "onCommand:sal.updateNightly",
-    "onCommand:sal.selectToolchainBinPath",
-    "onCommand:sal.runChecker",
-    "onCommand:sal.openRunConfig",
-    "onCommand:sal.openRuntimeDashboard",
-    "onCommand:sal.configureFlags",
-    "onCommand:sal.openSalenv",
-    "onCommand:sal.openSimulator",
-    "onCommand:sal.runWfc",
-    "onCommand:sal.runSmc",
-    "onCommand:sal.runBmc",
-    "onCommand:sal.runInfBmc",
-    "onCommand:sal.runEmc",
-    "onCommand:sal.runWmc",
-    "onCommand:sal.runDeadlockChecker",
-    "onCommand:sal.runPathFinder",
-    "onCommand:sal.runPathExplorer",
-    "onCommand:sal.runAtg",
-    "onCommand:sal.runInvalidStateDetector",
-    "onCommand:sal.runLtl2Buchi",
-    "onCommand:sal.runSal2Bool"
+    "onCommand:helloWorld.hello",
+    "onCommand:sal.installFromGitHubRelease"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -60,344 +37,38 @@
         "path": "./syntaxes/sal.tmLanguage.json"
       }
     ],
-    "snippets": [
-      {
-        "language": "sal",
-        "path": "./snippets/sal.json"
-      }
-    ],
     "commands": [
       {
-        "command": "sal.openStartupPane",
-        "title": "SAL: Startup Dashboard…"
+        "command": "helloWorld.hello",
+        "title": "Hello World: Say Hello"
       },
       {
-        "command": "sal.updateNightly",
-        "title": "SAL: Update Nightly Build"
-      },
-      {
-        "command": "sal.selectToolchainBinPath",
-        "title": "SAL: Select Toolchain Bin Path…"
-      },
-      {
-        "command": "sal.runChecker",
-        "title": "SAL: Run Checker\u2026"
-      },
-      {
-        "command": "sal.openRunConfig",
-        "title": "SAL: Configuration Manager\u2026"
-      },
-      {
-        "command": "sal.openRuntimeDashboard",
-        "title": "SAL: Runtime Dashboard\u2026"
-      },
-      {
-        "command": "sal.configureFlags",
-        "title": "SAL: Configure Tool Flags\u2026"
-      },
-      {
-        "command": "sal.openSalenv",
-        "title": "SAL: Open SALenv REPL (Terminal)"
-      },
-      {
-        "command": "sal.openSalenvSafe",
-        "title": "SAL: Open SALenv Safe REPL (Terminal)"
-      },
-      {
-        "command": "sal.openSimulator",
-        "title": "SAL: Open sal-sim (Terminal)"
-      },
-      {
-        "command": "sal.runWfc",
-        "title": "SAL: Well-Formedness Check (sal-wfc)"
-      },
-      {
-        "command": "sal.runSmc",
-        "title": "SAL: Symbolic Model Check (sal-smc)"
-      },
-      {
-        "command": "sal.runBmc",
-        "title": "SAL: Bounded Model Check (sal-bmc)"
-      },
-      {
-        "command": "sal.runInfBmc",
-        "title": "SAL: Infinite BMC (sal-inf-bmc)"
-      },
-      {
-        "command": "sal.runEmc",
-        "title": "SAL: Explicit Model Check (sal-emc)"
-      },
-      {
-        "command": "sal.runWmc",
-        "title": "SAL: Witness Model Check (sal-wmc)"
-      },
-      {
-        "command": "sal.runDeadlockChecker",
-        "title": "SAL: Deadlock Check (sal-deadlock-checker)"
-      },
-      {
-        "command": "sal.runInvalidStateDetector",
-        "title": "SAL: Invalid State Detection (sal-invalid-state-detector)"
-      },
-      {
-        "command": "sal.runPathFinder",
-        "title": "SAL: Path Finder (sal-path-finder)"
-      },
-      {
-        "command": "sal.runPathExplorer",
-        "title": "SAL: Path Explorer (sal-path-explorer)"
-      },
-      {
-        "command": "sal.runAtg",
-        "title": "SAL: Automated Test Generation (sal-atg)"
-      },
-      {
-        "command": "sal.runLtl2Buchi",
-        "title": "SAL: LTL \u2192 B\u00fcchi (ltl2buchi)"
-      },
-      {
-        "command": "sal.runSal2Bool",
-        "title": "SAL: SAL \u2192 Boolean TR (sal2bool)"
+        "command": "sal.installFromGitHubRelease",
+        "title": "SAL: Install from GitHub Release"
       }
     ],
-    "menus": {
-      "editor/title": [
-        {
-          "command": "sal.runChecker",
-          "when": "editorLangId == sal",
-          "group": "navigation@1"
-        },
-        {
-          "command": "sal.openRunConfig",
-          "when": "editorLangId == sal",
-          "group": "navigation@2"
-        },
-        {
-          "command": "sal.openRuntimeDashboard",
-          "when": "editorLangId == sal",
-          "group": "navigation@3"
-        }
-      ],
-      "editor/context": [
-        {
-          "command": "sal.runChecker",
-          "when": "editorLangId == sal",
-          "group": "navigation@1"
-        },
-        {
-          "command": "sal.openRunConfig",
-          "when": "editorLangId == sal",
-          "group": "navigation@2"
-        },
-        {
-          "command": "sal.openRuntimeDashboard",
-          "when": "editorLangId == sal",
-          "group": "navigation@3"
-        },
-        {
-          "command": "sal.configureFlags",
-          "when": "editorLangId == sal",
-          "group": "navigation@4"
-        }
-      ],
-      "explorer/context": [
-        {
-          "command": "sal.runChecker",
-          "when": "resourceExtname == .sal",
-          "group": "navigation@1"
-        },
-        {
-          "command": "sal.openRunConfig",
-          "when": "resourceExtname == .sal",
-          "group": "navigation@2"
-        },
-        {
-          "command": "sal.openRuntimeDashboard",
-          "when": "resourceExtname == .sal",
-          "group": "navigation@3"
-        }
-      ]
-    },
-    "views": {
-      "explorer": [
-        {
-          "id": "salToolsView",
-          "name": "SAL Tools"
-        }
-      ]
-    },
     "configuration": {
       "title": "SAL",
       "properties": {
         "sal.toolchain.binPath": {
           "type": "string",
           "default": "",
-          "description": "Directory containing SAL executables (sal-smc, sal-bmc, \u2026). If empty, the extension relies on your PATH."
+          "description": "Directory containing installed SAL executables."
         },
-        "sal.toolchain.prependBinPathToPATH": {
-          "type": "boolean",
-          "default": true,
-          "description": "If sal.toolchain.binPath is set, prepend it to PATH for tool executions."
-        },
-        "sal.env.salpath": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra directories to prepend to SALPATH when running tools. The active file's folder is always added automatically."
-        },
-        "sal.env.extra": {
-          "type": "object",
-          "default": {},
-          "description": "Extra environment variables to set when running SAL tools (e.g. { \"ICS_LICENSE_CERTIFICATE\": \"/path/to/certificate\" })."
-        },
-        "sal.run.useContextFromFile": {
-          "type": "boolean",
-          "default": true,
-          "description": "Prefer invoking tools using the context name parsed from the active file (and SALPATH) instead of passing a file path."
-        },
-        "sal.run.promptForContextInstantiation": {
-          "type": "boolean",
-          "default": true,
-          "description": "If the active context is parametric (e.g. bakery{N:...,B:...}), prompt for actual parameter values when invoking tools."
-        },
-        "sal.run.alwaysSaveBeforeRun": {
-          "type": "boolean",
-          "default": true,
-          "description": "Save the active SAL file before invoking a tool."
-        },
-        "sal.common.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Arguments passed to all SAL tools."
-        },
-        "sal.tools.wfc.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-wfc."
-        },
-        "sal.tools.smc.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-smc."
-        },
-        "sal.tools.bmc.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-bmc."
-        },
-        "sal.tools.infBmc.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-inf-bmc."
-        },
-        "sal.tools.emc.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-emc."
-        },
-        "sal.tools.wmc.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-wmc."
-        },
-        "sal.tools.deadlock.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-deadlock-checker."
-        },
-        "sal.tools.invalidStates.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-invalid-state-detector."
-        },
-        "sal.tools.pathFinder.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-path-finder."
-        },
-        "sal.tools.pathExplorer.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-path-explorer."
-        },
-        "sal.tools.atg.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal-atg."
-        },
-        "sal.tools.ltl2buchi.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to ltl2buchi."
-        },
-        "sal.tools.sal2bool.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra args passed to sal2bool."
-        },
-        "sal.diagnostics.enable": {
-          "type": "boolean",
-          "default": true,
-          "description": "Best-effort parsing of tool output into VSCode diagnostics (Problems panel)."
-        },
-        "sal.startup.nightlyRepository": {
+        "sal.install.repository": {
           "type": "string",
           "default": "karthiknukala/sal",
-          "description": "GitHub repository (owner/repo) used for the nightly release check and install."
+          "description": "GitHub repository to install from, written as owner/repo."
         },
-        "sal.startup.repositories": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "karthiknukala/sal"
-          ],
-          "description": "GitHub repositories (owner/repo) summarized in the startup dashboard commit pane."
+        "sal.install.releaseTag": {
+          "type": "string",
+          "default": "nightly",
+          "description": "Release tag to install. Leave empty to install the latest release."
+        },
+        "sal.install.directory": {
+          "type": "string",
+          "default": "",
+          "description": "Install directory. Leave empty to use VS Code extension storage."
         }
       }
     }

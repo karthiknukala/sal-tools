@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "SAL",
   "scopeName": "source.sal",
   "patterns": [
@@ -6,33 +7,38 @@
       "include": "#comments"
     },
     {
-      "include": "#declarations"
-    },
-    {
-      "include": "#types"
-    },
-    {
-      "include": "#constants"
-    },
-    {
-      "include": "#keywords"
-    },
-    {
-      "include": "#operators"
+      "include": "#strings"
     },
     {
       "include": "#numbers"
     },
     {
-      "include": "#strings"
+      "include": "#definitions"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#operators"
     }
   ],
   "repository": {
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.percentage.sal",
-          "match": "%.*$"
+          "name": "comment.line.double-dash.sal",
+          "match": "--.*$"
+        },
+        {
+          "name": "comment.block.sal",
+          "begin": "%\\{",
+          "end": "\\}%"
         }
       ]
     },
@@ -55,47 +61,46 @@
       "patterns": [
         {
           "name": "constant.numeric.sal",
-          "match": "\\b\\d+\\b"
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
         }
       ]
     },
-    "operators": {
+    "definitions": {
       "patterns": [
         {
-          "name": "keyword.operator.sal",
-          "match": "<=>|=>|/="
+          "name": "meta.context.sal",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_']*)\\b\\s*(?=\\{?[^:=]*\\}?\\s*:\\s*CONTEXT\\b)",
+          "captures": {
+            "1": {
+              "name": "entity.name.namespace.sal"
+            }
+          }
         },
         {
-          "name": "keyword.operator.sal",
-          "match": "-->|\\|-|\\.{2}|:=|="
+          "name": "meta.module.sal",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_']*)\\b\\s*(?=\\{?[^:=]*\\}?\\s*:\\s*MODULE\\b)",
+          "captures": {
+            "1": {
+              "name": "entity.name.type.module.sal"
+            }
+          }
         },
         {
-          "name": "keyword.operator.sal",
-          "match": "\\+|-|\\*|/|<|<=|>|>=|\\^"
-        },
-        {
-          "name": "punctuation.separator.qualification.sal",
-          "match": "!"
-        },
-        {
-          "name": "punctuation.definition.prime.sal",
-          "match": "'"
+          "name": "meta.assertion.sal",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_']*)\\b\\s*(?=:\\s*(?:THEOREM|LEMMA|CLAIM|OBLIGATION)\\b)",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.sal"
+            }
+          }
         }
       ]
     },
     "types": {
       "patterns": [
         {
-          "name": "support.type.sal",
-          "match": "\\b(?i:NZINTEGER|BOOLEAN|INTEGER|NATURAL|NZREAL|REAL)\\b"
-        }
-      ]
-    },
-    "constants": {
-      "patterns": [
-        {
-          "name": "constant.language.sal",
-          "match": "\\b(?i:FALSE|TRUE)\\b"
+          "name": "storage.type.sal",
+          "match": "\\b(?:ARRAY|BOOLEAN|CONTEXT|DATATYPE|GLOBAL|INPUT|INTEGER|LOCAL|MODULE|NATURAL|OUTPUT|REAL|TYPE)\\b"
         }
       ]
     },
@@ -103,70 +108,27 @@
       "patterns": [
         {
           "name": "keyword.control.sal",
-          "match": "\\b(?i:INITIALIZATION|DEFINITION|OBLIGATION|DATATYPE|CONTEXT|THEOREM|EXISTS|FORALL|GLOBAL|LAMBDA|MODULE|OUTPUT|RENAME|BEGIN|ELSIF|ENDIF|INPUT|LEMMA|LOCAL|CLAIM|ARRAY|ELSE|THEN|TYPE|WITH|END|LET|IF|IN|TO|OF)\\b"
+          "match": "\\b(?:BEGIN|CASE|DEFAULT|ELSE|ELSIF|END|ENDIF|IF|OF|THEN|WITH)\\b"
         },
         {
-          "name": "keyword.operator.word.sal",
-          "match": "\\b(?i:AND|NOT|XOR|OR)\\b"
-        },
-        {
-          "name": "support.function.temporal.sal",
-          "match": "\\b(?i:AG|AF|AX|EG|EF|EX|AU|EU|G|F|X|U|R)\\b"
+          "name": "keyword.other.sal",
+          "match": "\\b(?:ASSERTION|AXIOM|CLAIM|DEFINITION|EXISTS|FORALL|INITIALIZATION|INVARIANT|LEMMA|LET|OBLIGATION|THEOREM|TRANSITION)\\b"
         }
       ]
     },
-    "declarations": {
+    "constants": {
       "patterns": [
         {
-          "name": "meta.declaration.context.sal",
-          "match": "^\\s*([A-Za-z][\\w\\?_]*)(\\s*\\{[^}]*\\})?\\s*:\\s*\\b(?i:CONTEXT)\\b",
-          "captures": {
-            "1": {
-              "name": "entity.name.type.context.sal"
-            },
-            "2": {
-              "name": "meta.parameters.context.sal"
-            }
-          }
-        },
+          "name": "constant.language.boolean.sal",
+          "match": "\\b(?:FALSE|TRUE)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
         {
-          "name": "meta.declaration.module.sal",
-          "match": "^\\s*([A-Za-z][\\w\\?_]*)(\\s*\\[[^\\]]*\\])?\\s*:\\s*\\b(?i:MODULE)\\b",
-          "captures": {
-            "1": {
-              "name": "entity.name.type.module.sal"
-            },
-            "2": {
-              "name": "meta.parameters.module.sal"
-            }
-          }
-        },
-        {
-          "name": "meta.declaration.type.sal",
-          "match": "^\\s*([A-Za-z][\\w\\?_]*)\\s*:\\s*\\b(?i:TYPE)\\b",
-          "captures": {
-            "1": {
-              "name": "entity.name.type.sal"
-            }
-          }
-        },
-        {
-          "name": "meta.declaration.assertion.sal",
-          "match": "^\\s*([A-Za-z][\\w\\?_]*)\\s*:\\s*\\b(?i:THEOREM|LEMMA|CLAIM|OBLIGATION)\\b",
-          "captures": {
-            "1": {
-              "name": "entity.name.function.assertion.sal"
-            }
-          }
-        },
-        {
-          "name": "meta.declaration.label.sal",
-          "match": "^\\s*([A-Za-z][\\w\\?_]*)\\s*:\\s*$",
-          "captures": {
-            "1": {
-              "name": "entity.name.label.sal"
-            }
-          }
+          "name": "keyword.operator.sal",
+          "match": "(?:=>|->|/=|<=|>=|\\b(?:AND|OR|NOT|XOR|IMPLIES|IFF|IN)\\b|[=:+\\-*/<>])"
         }
       ]
     }
